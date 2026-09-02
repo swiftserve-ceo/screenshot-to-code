@@ -24,3 +24,5 @@ frontend/.env.local
 
 # Walkthrough demo videos
 walkthrough/
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
