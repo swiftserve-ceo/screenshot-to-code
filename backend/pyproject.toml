@@ -39,6 +39,9 @@ redis = {version = ">=4.2,<6", extras = ["hiredis"]}
 pytest = "^7.4.3"
 pyright = "^1.1.352"
 pytest-asyncio = "^0.21"
+# A per-test wall-clock cap so a test that hangs (e.g. a stuck arq worker /
+# pub-sub in CI) fails with a traceback instead of hanging the whole job.
+pytest-timeout = "^2.3"
 
 [build-system]
 requires = ["poetry-core"]

@@ -30,22 +30,25 @@ jobs:
           POSTGRES_PASSWORD: appbuilder
           POSTGRES_DB: appbuilder
         ports:
-          - 5432:5432
+          - 127.0.0.1:5432:5432
         options: >-
           --health-cmd "pg_isready -U appbuilder -d appbuilder"
           --health-interval 5s --health-timeout 3s --health-retries 20
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 127.0.0.1:6379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 20
 
     env:
-      # Non-secret throwaway credentials for CI service containers.
-      DATABASE_URL: postgresql+asyncpg://appbuilder:appbuilder@localhost:5432/appbuilder
-      REDIS_URL: redis://localhost:6379/0
+      # Non-secret throwaway credentials for CI service containers. Use the
+      # explicit IPv4 loopback, not "localhost": on a dual-stack runner
+      # "localhost" can resolve to ::1 first and the service-container port is
+      # only published on IPv4, which stalls arq's redis reconnect loop.
+      DATABASE_URL: postgresql+asyncpg://appbuilder:appbuilder@127.0.0.1:5432/appbuilder
+      REDIS_URL: redis://127.0.0.1:6379/0
       REQUIRE_INFRA: "1"
 
     steps:
