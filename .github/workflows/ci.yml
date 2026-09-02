@@ -20,6 +20,7 @@ jobs:
   backend:
     name: backend (pytest, pyright, alembic)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -95,6 +96,7 @@ jobs:
   frontend:
     name: frontend (jest, lint ratchet, build)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4

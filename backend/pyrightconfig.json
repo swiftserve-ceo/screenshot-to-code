@@ -1,5 +1,13 @@
 {
-  "exclude": ["image_generation.py"],
+  "include": ["."],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    ".venv",
+    "venv",
+    "image_generation.py"
+  ],
   "pythonVersion": "3.12",
   "typeCheckingMode": "basic",
   "reportMissingTypeStubs": "none",
