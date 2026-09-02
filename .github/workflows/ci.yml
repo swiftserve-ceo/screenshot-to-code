@@ -74,6 +74,14 @@ jobs:
           poetry config virtualenvs.in-project true
           poetry install --no-interaction
 
+      - name: Install Playwright Chromium
+        # main.py's lifespan startup probes headless Chromium to decide whether
+        # the screenshot_preview tool is offered. Several tests enter the app via
+        # TestClient (which runs the real lifespan); without a browser the probe
+        # would hang. Mirrors backend/Dockerfile.
+        working-directory: backend
+        run: poetry run playwright install --with-deps chromium
+
       - name: Type check (pyright)
         working-directory: backend
         run: poetry run pyright

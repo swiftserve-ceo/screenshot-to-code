@@ -1,8 +1,17 @@
+import asyncio
 from typing import Optional
 
 from babel_cdn import normalize_babel_cdn
+from logging_config import get_logger
 from preview_screenshot.base import ScreenshotBackend
 from preview_screenshot.playwright_backend import PlaywrightBackend
+
+logger = get_logger("screenshot_preview")
+
+# Upper bound on the one-time startup probe. A cold headless Chromium launches in
+# well under this; a missing / broken browser must not hang app startup (spec
+# NFR-4 — a missing infra dependency fails, it does not hang).
+_PROBE_TIMEOUT_SECONDS = 30.0
 
 # The active backend. Defaults to local Chromium; a deployment can swap in an
 # alternative (e.g. an external rendering API) via set_screenshot_backend.
@@ -32,10 +41,27 @@ def disable_screenshot_preview() -> None:
 
 
 async def probe_screenshot_preview() -> bool:
-    """Check (once, cached) whether the active backend can run here."""
+    """Check (once, cached) whether the active backend can run here.
+
+    Time-bounded: if the probe (a headless-browser launch) does not settle
+    within ``_PROBE_TIMEOUT_SECONDS`` the tool is marked unavailable rather than
+    hanging startup.
+    """
     global _available
     if _available is None:
-        _available = await _backend.available()
+        try:
+            _available = await asyncio.wait_for(
+                _backend.available(), timeout=_PROBE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "screenshot_preview probe timed out after %ss; tool disabled",
+                _PROBE_TIMEOUT_SECONDS,
+            )
+            _available = False
+        except Exception:  # noqa: BLE001 - probe must never propagate
+            logger.warning("screenshot_preview probe raised; tool disabled", exc_info=True)
+            _available = False
     return _available
 
 
