@@ -906,6 +906,7 @@ function BestOfNEvalsPage() {
                       </div>
                       <iframe
                         srcDoc={selectedHtml}
+                        sandbox="allow-scripts"
                         className="w-full h-full rounded-lg"
                       ></iframe>
                     </DialogContent>
@@ -917,6 +918,9 @@ function BestOfNEvalsPage() {
                       iframeRefs.current[currentModelIndex] = el;
                     }}
                     srcDoc={currentEval.outputs[currentModelIndex]}
+                    // Renders untrusted generated HTML: scripts only, never
+                    // "allow-same-origin".
+                    sandbox="allow-scripts"
                     className="w-full h-[calc(100vh-200px)]"
                     style={{ colorScheme: "light" }}
                   ></iframe>

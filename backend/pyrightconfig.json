@@ -1,5 +1,6 @@
 {
   "exclude": ["image_generation.py"],
+  "pythonVersion": "3.12",
   "typeCheckingMode": "basic",
   "reportMissingTypeStubs": "none",
   "reportUnknownVariableType": "warning"

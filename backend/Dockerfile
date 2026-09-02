@@ -1,6 +1,7 @@
-FROM python:3.12.3-slim-bookworm
+FROM python:3.12-slim-bookworm
 
-ENV POETRY_VERSION 1.8.0
+# Poetry 2.x — required to read the lock file (lock-version 2.1).
+ENV POETRY_VERSION 2.4.2
 
 # Install system dependencies
 RUN pip install "poetry==$POETRY_VERSION"

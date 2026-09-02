@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { AppState } from "../types";
+import type { SelectedElement } from "../components/preview/previewMessaging";
 
 // Store for app-wide state
 interface AppStore {
@@ -18,8 +19,10 @@ interface AppStore {
   toggleInSelectAndEditMode: () => void;
   disableInSelectAndEditMode: () => void;
 
-  selectedElement: HTMLElement | null;
-  setSelectedElement: (element: HTMLElement | null) => void;
+  // A serialized snapshot of the element the user picked in the (sandboxed)
+  // preview — never a live cross-frame DOM node.
+  selectedElement: SelectedElement | null;
+  setSelectedElement: (element: SelectedElement | null) => void;
   clearSelectedElement: () => void;
 }
 
@@ -44,13 +47,13 @@ export const useAppStore = create<AppStore>((set) => ({
         : { inSelectAndEditMode: true }
     ),
   // Exiting selection mode and releasing its locked target are one action.
-  // Keeping this atomic prevents a stale iframe element from surviving a
-  // version change until PreviewComponent's effects get a chance to run.
+  // Keeping this atomic prevents a stale selection from surviving a version
+  // change until PreviewComponent's effects get a chance to run.
   disableInSelectAndEditMode: () =>
     set({ inSelectAndEditMode: false, selectedElement: null }),
 
   selectedElement: null,
-  setSelectedElement: (element: HTMLElement | null) =>
+  setSelectedElement: (element: SelectedElement | null) =>
     set({ selectedElement: element }),
   clearSelectedElement: () => set({ selectedElement: null }),
 }));

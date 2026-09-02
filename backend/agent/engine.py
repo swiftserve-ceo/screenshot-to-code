@@ -20,6 +20,9 @@ from agent.tools import (
 )
 from config import GENERATION_MAX_COST_USD
 from fs_logging.agent_runs import AgentRunRecorder
+from logging_config import get_logger
+
+logger = get_logger("agent.engine")
 
 
 class EmptyOutputError(Exception):
@@ -269,9 +272,13 @@ class AgentEngine:
             # models return None and are not bounded.
             spent = session.total_cost_usd()
             if spent is not None and spent > GENERATION_MAX_COST_USD:
-                print(
-                    f"[BUDGET] Aborting variant {self.variant_index}: "
-                    f"${spent:.2f} > ${GENERATION_MAX_COST_USD:.2f}"
+                logger.warning(
+                    "aborting variant: spend ceiling exceeded",
+                    extra={
+                        "variant": self.variant_index,
+                        "spent_usd": round(spent, 2),
+                        "ceiling_usd": GENERATION_MAX_COST_USD,
+                    },
                 )
                 raise BudgetExceededError()
 

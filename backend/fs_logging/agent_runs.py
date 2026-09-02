@@ -43,6 +43,9 @@ from llm import MODEL_PROVIDER, Llm
 from costs.pricing import MODEL_PRICING
 from costs.token_usage import TokenUsage
 from fs_logging.prompt_reports import get_run_logs_directory, to_serializable
+from logging_config import get_logger
+
+logger = get_logger("fs_logging.agent_runs")
 
 if TYPE_CHECKING:
     from agent.providers.base import StreamEvent
@@ -392,8 +395,8 @@ class AgentRunRecorder:
                     self._input_image_sha256,
                 ),
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record run start: {exc}")
+        except Exception:
+            logger.warning("failed to record run start", exc_info=True)
 
     # -------------------------------------------------------------- LLM hooks
 
@@ -421,8 +424,8 @@ class AgentRunRecorder:
                     "request": payload,
                 },
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record LLM request: {exc}")
+        except Exception:
+            logger.warning("failed to record llm request", exc_info=True)
 
     def record_stream_event(
         self, event: "StreamEvent", event_id: Optional[str]
@@ -464,8 +467,8 @@ class AgentRunRecorder:
                     }
                 )
             self._append_event("stream_delta", payload)
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record stream event: {exc}")
+        except Exception:
+            logger.warning("failed to record stream event", exc_info=True)
 
     def record_llm_response(
         self,
@@ -562,8 +565,8 @@ class AgentRunRecorder:
                     len(tool_calls),
                 ),
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record LLM response: {exc}")
+        except Exception:
+            logger.warning("failed to record llm response", exc_info=True)
 
     # ------------------------------------------------------------- tool hooks
 
@@ -582,8 +585,8 @@ class AgentRunRecorder:
                     "arguments": tool_call.arguments,
                 },
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record tool start: {exc}")
+        except Exception:
+            logger.warning("failed to record tool start", exc_info=True)
 
     def record_tool_end(
         self,
@@ -639,8 +642,8 @@ class AgentRunRecorder:
                 },
             )
             self._schedule_tool_asset_downloads(tool_event_id, result)
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record tool end: {exc}")
+        except Exception:
+            logger.warning("failed to record tool end", exc_info=True)
 
     def _schedule_tool_asset_downloads(
         self, tool_event_id: str, result: "ToolExecutionResult"
@@ -678,8 +681,8 @@ class AgentRunRecorder:
         except RuntimeError:
             # No running event loop (sync callers/tests): skip quietly.
             return
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to schedule tool asset downloads: {exc}")
+        except Exception:
+            logger.warning("failed to schedule tool asset downloads", exc_info=True)
 
     async def _download_tool_asset(
         self, url: str, tool_event_id: str, index: int, entry: dict[str, Any]
@@ -718,8 +721,8 @@ class AgentRunRecorder:
             self._append_event(
                 "set_code", {"step": self._step, "source": source, "content_len": content_len}
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record set_code: {exc}")
+        except Exception:
+            logger.warning("failed to record set_code", exc_info=True)
 
     # --------------------------------------------------------------- finalize
 
@@ -834,8 +837,8 @@ class AgentRunRecorder:
                     self.run_id,
                 ),
             )
-        except Exception as exc:
-            print(f"[AGENT RUN] Failed to record run end: {exc}")
+        except Exception:
+            logger.warning("failed to record run end", exc_info=True)
 
     # --------------------------------------------------------- output capture
 

@@ -23,10 +23,10 @@
 root `package.json` with pnpm `workspaces: ["frontend", "backend"]` and helper
 scripts (`pnpm test` → runs frontend jest + backend pytest).
 
-> ⚠️ `frontend/Dockerfile` still uses `yarn install` / `yarn dev` and references
-> a non-existent `yarn.lock`. The repo migrated to pnpm; the Dockerfile is
-> stale. Use `pnpm` directly for local dev; fix the Dockerfile before relying on
-> the container path.
+> `frontend/Dockerfile` was repaired in Phase 1 Remediation Batch 1 to use
+> `corepack` + `pnpm install --frozen-lockfile` + `pnpm dev` (it previously used
+> `yarn` against a non-existent `yarn.lock`). The container build is not yet
+> exercised in CI. `backend/Dockerfile` is unchanged (poetry 1.8 / python 3.12.3).
 
 ---
 
@@ -34,28 +34,51 @@ scripts (`pnpm test` → runs frontend jest + backend pytest).
 
 ### Backend (`backend/.env`, loaded by `python-dotenv` in `main.py`)
 
+> As of **Phase 1 Remediation Batch 1**, all backend config is read once at
+> startup into a validated `Settings` object (`backend/config.py`). Copy
+> **`backend/.env.example`** as your starting point. Invalid values (a
+> non-boolean flag, a bad `LOG_LEVEL`, a non-http `OPENAI_BASE_URL`) now abort
+> startup with a clear message.
+
 | Var | Required? | Purpose |
 |---|---|---|
 | `OPENAI_API_KEY` | one of the three | GPT code-gen variants |
 | `ANTHROPIC_API_KEY` | one of the three | Claude code-gen variants |
 | `GEMINI_API_KEY` | one of the three — **needed for video mode and asset extraction** | Gemini code-gen + `extract_assets` tool + video input |
 | `REPLICATE_API_KEY` | optional (**`.env` only**, not accepted from the UI) | `generate_images`, `edit_images`, `remove_backgrounds` |
-| `OPENAI_BASE_URL` | optional | OpenAI proxy; **ignored when `IS_PROD` is truthy** |
-| `IS_PROD` | optional | Truthy = production feature flags (disables base-URL override, changes error copy). Any non-empty value is truthy. |
-| `IS_DEBUG_ENABLED` | optional | Truthy = sends `variantModels` to the client, enables `debug/` file dumps. Note: `bool(os.environ.get(...))` — **any non-empty string is true, including `"false"`**. |
+| `OPENAI_BASE_URL` | optional | OpenAI proxy; **ignored when `IS_PROD` is truthy**; must start with `http(s)://` |
+| `IS_PROD` | optional | `true` = production feature flags. **Strict boolean now** — `1/true/yes/on` vs `0/false/no/off`/unset; anything else aborts startup. |
+| `IS_DEBUG_ENABLED` | optional | `true` = sends `variantModels` to the client, enables `debug/` file dumps. **Strict boolean** (the old `bool(os.environ.get(...))` bug where `"false"` was true is fixed). |
 | `DEBUG_DIR` | optional | Where `DebugFileWriter` writes |
-| `PROMPT_REPORTS_ENABLED` | optional | `1/true/yes/on` = full run capture (JSONL + SQLite + HTML/asset snapshots) under `run_logs/agent_runs`; browsable at `/evals/prompt-reports` and `/evals/agent-runs` |
-| `LOGS_PATH` | optional | Base dir for `run_logs/` (see `fs_logging/prompt_reports.get_run_logs_directory`) |
-| `LOCAL_ASSET_DIR` | optional | Default `backend/local_assets/`; content-addressed image store served at `/local-assets/` |
-| `LOCAL_ASSET_BASE_URL` | optional | Default `http://127.0.0.1:7001`; used by the evals path which has no request to infer host from |
+| `PROMPT_REPORTS_ENABLED` | optional | `true` = full run capture (JSONL + SQLite + HTML/asset snapshots) under `run_logs/agent_runs` |
+| `CORS_ALLOWED_ORIGINS` | optional | Comma-separated exact origins allowed to call the API. Default = local dev origins (`localhost`/`127.0.0.1` on `:5173` and `:5180`). **No wildcard.** |
+| `OPERATOR_TOKEN` | optional | Shared secret for the internal `/evals*`, `/eval-sets*`, `/eval-sessions*`, `/prompt-reports*`, `/agent-runs*` endpoints. When set, send it as the `X-Operator-Token` request header. |
+| `OPERATOR_ENDPOINTS_PUBLIC` | optional | `true` = leave those endpoints open (**local dev only**). Secure default `false` → they return 403 until `OPERATOR_TOKEN` or this is set. |
+| `LOG_LEVEL` | optional | `DEBUG` \| `INFO` (default) \| `WARNING` \| `ERROR` \| `CRITICAL` |
+| `LOG_FORMAT` | optional | `console` (default, human key=value) \| `json` |
+| `DATABASE_URL` | optional (Batch 2) | `postgresql+asyncpg://…` (a plain `postgresql://` is normalised). **Unset ⇒ DB disabled, sync generation still works.** |
+| `REDIS_URL` | optional (Batch 2) | Default `redis://127.0.0.1:6379/0`. Needed for the worker. |
+| `JOB_QUEUE_ENABLED` | optional (Batch 3) | Strict bool, default `false`. When `true`, the **text → create** generation path runs through the Redis/arq worker (needs a running worker); all other paths stay synchronous. |
+| `JOB_MAX_ATTEMPTS` / `JOB_TIMEOUT_SECONDS` | optional (Batch 2) | Worker retry cap (default `3`) and per-job wall-clock watchdog (default `900`, arq in-process). |
+| `JOB_REAP_AFTER_SECONDS` | optional (final audit) | Out-of-process watchdog: a job left `running` this long is reaped to `failed` by the worker's `reap_jobs` cron (every 5 min). Default `3600`; `0` disables. |
+| `JOB_RETENTION_DAYS` | optional (Batch 4) | Unset ⇒ **no pruning**. A positive integer ⇒ the worker's daily `prune_jobs` cron deletes *terminal* job rows older than N days. Queued/running rows are never pruned. |
+| `WORKER_HEALTH_INTERVAL_SECONDS` | optional (final audit) | How often the worker refreshes its arq health-check key (default `30`). `/health` reports `worker: down` once it lapses. |
+| `WORKER_NAME` | optional (Batch 2) | Overrides the worker identity string in logs (default `worker@<host>:<pid>`). |
+| `REQUIRE_INFRA` | optional (tests only) | `1` in CI: infra-dependent tests that would `skip` become hard failures. |
+| `LOGS_PATH` | optional | Base dir for `run_logs/` |
+| `LOCAL_ASSET_DIR` | optional | Default `backend/local_assets/`; served at `/local-assets/` |
+| `LOCAL_ASSET_BASE_URL` | optional | Default `http://127.0.0.1:7001` |
 | `SCREENSHOT_TO_CODE_DATA_DIR` | optional | Default `~/.screenshot-to-code/`; holds `design-systems.json` |
-
-Config constants **not** env-driven: `NUM_VARIANTS = 4`, `NUM_VARIANTS_VIDEO = 2`,
-`GENERATION_MAX_COST_USD = 3.0` (all in `backend/config.py`).
+| `NUM_VARIANTS` / `NUM_VARIANTS_VIDEO` / `GENERATION_MAX_COST_USD` | optional | Now env-overridable (defaults `4` / `2` / `3.0`). |
 
 At least one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` must be
 available (env or Settings dialog) or generation fails fast with
 `"No OpenAI, Anthropic, or Gemini API key found"`.
+
+> **`PYTHONUTF8=1` is no longer required** on Windows. Batch 1 made logging
+> encoding-safe, so `poetry run uvicorn main:app --port 7001` works on a default
+> console. (It was previously needed to avoid a `UnicodeEncodeError` crash in
+> `print_prompt_preview` — audit KF-1.)
 
 ### Frontend (`frontend/.env.local`, git-ignored)
 
@@ -78,14 +101,145 @@ so with both services on defaults you usually need **no `.env.local` at all**.
 |---|---|---|---|
 | Backend (FastAPI + WS) | **7001** | `127.0.0.1` (`start.py`) / `0.0.0.0` (docker-compose, `--host`) | `--port`; docker `BACKEND_PORT`; `start.py` **auto-scans 7001→7020** for a free port |
 | Frontend (Vite dev) | **5173** | `host: true` (all interfaces, `vite.config.ts`) | Vite `--port` |
+| PostgreSQL (Batch 2) | **5435** → container 5432 | `127.0.0.1` only | compose `POSTGRES_PORT`; container always 5432 |
+| Redis (Batch 2) | **6379** | `127.0.0.1` only | compose `REDIS_PORT` |
+| Worker (arq, Batch 2) | — (no port) | — | `poetry run arq worker.WorkerSettings` |
 | — | — | — | AGENTS.md note: use `http://localhost:5173`, **not** `127.0.0.1:5173` (the latter is refused in some setups) |
 
-**No ports are used for:** a database, Redis, generated-app previews, or a
-browser-automation service — none of those exist yet. Headless Chromium for
-`screenshot_preview` runs in-process in the backend (no port).
+**Batch 2 added:** PostgreSQL on **`127.0.0.1:5435`** (container 5432) and Redis
+on **`127.0.0.1:6379`**, both via `docker-compose.yml`, loopback-only. The
+optional **worker** process has no port. Headless Chromium for
+`screenshot_preview` still runs in-process in the backend.
 
 `start.py` is the only component with port-conflict handling; `uvicorn
 main:app` directly does not scan.
+
+---
+
+## 3a. Infrastructure stack (PostgreSQL + Redis + worker) — Batch 2, extended through Batch 4
+
+### Full stack, copy/paste (four terminals, from the repo root)
+
+```bash
+# 0. infra
+docker compose up -d postgres redis
+docker compose ps                                   # both (healthy)
+
+# 1. migrate  (terminal A, from backend/)
+cd backend
+export DATABASE_URL=postgresql+asyncpg://appbuilder:appbuilder@127.0.0.1:5435/appbuilder
+export REDIS_URL=redis://127.0.0.1:6379/0
+poetry run alembic upgrade head
+poetry run alembic check                            # must say "No new upgrade operations detected."
+
+# 2. backend  (terminal A, same env)
+JOB_QUEUE_ENABLED=true poetry run uvicorn main:app --reload --port 7001
+
+# 3. worker   (terminal B, from backend/)
+cd backend
+DATABASE_URL=postgresql+asyncpg://appbuilder:appbuilder@127.0.0.1:5435/appbuilder \
+REDIS_URL=redis://127.0.0.1:6379/0 \
+JOB_QUEUE_ENABLED=true \
+poetry run arq worker.WorkerSettings
+
+# 4. frontend (terminal C, from frontend/)
+cd frontend && pnpm dev                             # → http://localhost:5173
+
+# 5. health check (terminal D)
+curl -s http://127.0.0.1:7001/health
+#   → {"status":"ok","checks":{"database":"ok","redis":"ok","worker":"ok"},"job_queue_enabled":true}
+#     "worker":"down" (+ status "degraded") when JOB_QUEUE_ENABLED=true and no worker is running.
+curl -s http://127.0.0.1:7001/api/models | python -m json.tool | head   # capability catalog (no keys/pricing)
+```
+
+Windows: use `127.0.0.1`, **not** `localhost`, for Redis (IPv6 `::1` resolution).
+
+```bash
+# from repo root — start just the infra (backend/frontend still run natively):
+docker compose up -d postgres redis
+docker compose ps          # both should be (healthy)
+docker compose down        # stop        (add -v to also wipe the volumes)
+```
+
+Point the backend at them (put these in `backend/.env`):
+
+```
+DATABASE_URL=postgresql+asyncpg://appbuilder:appbuilder@127.0.0.1:5435/appbuilder
+REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+The database is **optional** — with no `DATABASE_URL` the backend still starts
+and screenshot→code generation works; `GET /health` then shows
+`database: disabled`. Redis is only needed to run the worker.
+
+### Migrations (Alembic)
+
+```bash
+cd backend
+poetry run alembic upgrade head        # apply
+poetry run alembic downgrade base      # roll back
+poetry run alembic upgrade head        # re-apply (round-trip check)
+poetry run alembic check               # model-drift gate (also runs in CI)
+poetry run alembic current             # show applied revision
+poetry run alembic revision --autogenerate -m "..."   # (later phases)
+```
+
+Alembic reads `DATABASE_URL` from the typed settings — nothing is stored in
+`alembic.ini`. The only table this phase is `jobs` (infrastructure; no domain
+tables yet). `alembic check` fails if the ORM models and the migration history
+have drifted — CI runs it on every PR.
+
+### Worker (arq)
+
+```bash
+cd backend
+poetry run arq worker.WorkerSettings   # foreground; Ctrl-C for a clean shutdown
+```
+
+Needs `REDIS_URL` (and `DATABASE_URL` for durable job state). Tasks: `ping`
+(health), `execute_job` (runs a persisted job's handler) and the `prune_jobs`
+cron. Handlers: `noop` (tests) and **`generation`** (the queued text→create
+path). `GET /health` reports `job_queue_enabled`.
+
+The worker **hard-disables `screenshot_preview`** at startup — it must never
+render (execute) generated code. The synchronous backend still offers that tool.
+
+**Job retention (opt-in):** set `JOB_RETENTION_DAYS=<N>` and the worker's daily
+`prune_jobs` cron (03:17) deletes terminal (`succeeded`/`failed`/`cancelled`)
+job rows older than `N` days. Queued/running rows are never pruned. Unset = no
+pruning.
+
+### Queued generation (Batch 3 — the migrated `text → create` path)
+
+Set `JOB_QUEUE_ENABLED=true` in `backend/.env`, start the **worker** alongside
+the backend, then use the app's **Text** tab → *Generate*. That request now:
+
+1. creates a durable `generation` job (Postgres) — **browser-entered provider
+   keys are stripped; the worker uses server-env keys only**;
+2. enqueues it (Redis/arq) and returns a `job_id` over the WebSocket
+   (`jobCreated` message) — the UI shows `Queued...` → `Generating code...`;
+3. runs in the **independent worker**; a dropped WebSocket does **not** cancel
+   it (`frontend/src/generateCode.ts` transparently re-attaches with `{jobId}`,
+   or you can poll `GET /api/jobs/{job_id}`);
+4. streams generation events back through the WebSocket relay in the existing
+   vocabulary (`variantCount` / `status` / `setCode` / `variantComplete` /
+   `error`), plus additive `jobStatus`.
+
+**Explicit cancel:** `POST /api/jobs/{job_id}/cancel` — QUEUED → `cancelled`
+immediately (the worker skips it); RUNNING → `cancelled` + a best-effort arq
+abort (raises `CancelledError` in the worker task); terminal → `409`. A connected
+relay forwards the `cancelled` event and closes the socket.
+
+Without server provider keys the queued path ends in the **controlled**
+"No OpenAI, Anthropic, or Gemini API key found" error (not a crash). Every other
+generation path (image / URL / video / **edit**, and text→create when the flag
+is off) is unchanged and synchronous.
+
+### Full-stack via Docker (demo, no hot reload)
+
+```bash
+docker compose --profile app up -d --build   # postgres + redis + backend + worker + frontend
+```
 
 ---
 
@@ -132,39 +286,34 @@ docker-compose up -d --build             # frontend :5173, backend :7001
 
 | Scope | Command | Baseline result on this checkout |
 |---|---|---|
-| Backend unit tests | `cd backend && poetry run pytest` | **276 passed** (~77 s) on Python 3.13 |
-| Backend type check | `cd backend && poetry run pyright` | **0 errors, 36 warnings** (all `reportUnknownVariableType`, which `pyrightconfig.json` sets to `warning`) |
-| Frontend lint | `cd frontend && pnpm lint` | **FAILS**: 19 errors + 6 warnings, all pre-existing (see §6) |
-| Frontend unit tests | `cd frontend && pnpm test` | **42 passed, 6 skipped, 1 suite skipped** (`qa.test.ts`, gated by `RUN_E2E`) |
-| Frontend E2E/QA | `cd frontend && pnpm test:qa` (needs `RUN_E2E=true`, a running app, provider keys) | **not run** during discovery (requires live services + keys) |
-| Frontend build | `cd frontend && pnpm build` (`tsc && vite build`) | **passes**; emits one ~1.4 MB JS chunk (no code-splitting; Vite warns >500 kB) |
+| Backend unit tests | `cd backend && poetry run pytest` | **632 passed** with infra (`DATABASE_URL`+`REDIS_URL`+`REQUIRE_INFRA=1`); without infra the DB/Redis/queue tests `skip`. |
+| Backend type check | `cd backend && poetry run pyright` | **0 errors, 36 warnings** (all `reportUnknownVariableType` / bs4 typing, which `pyrightconfig.json` sets to `warning`) |
+| Backend migrations | `poetry run alembic upgrade head && poetry run alembic check` | applies + **no drift** |
+| Frontend lint | `cd frontend && pnpm run lint:ratchet` | **passes** at the baseline in `frontend/.lint-baseline.json` (currently 16 errors / 6 warnings, all pre-existing — see §6). Raw `pnpm lint` still fails `--max-warnings 0`. |
+| Frontend unit tests | `cd frontend && pnpm test` | **44 passed, 6 skipped** (+`generateCode.test.ts`) |
+| Frontend build | `cd frontend && pnpm build` (`tsc && vite build`) | **passes**; one ~1.4 MB JS chunk (Vite warns >500 kB) |
 | Root convenience | `pnpm test` (root) | runs frontend jest + backend pytest |
-| Backend eval runner | `cd backend && poetry run python run_evals.py` | needs an eval dataset in `backend/evals_data/inputs` (not in repo) + keys — not run |
 
 pytest config: `backend/pytest.ini` (`testpaths = tests`, `asyncio_mode = auto`).
-There is **no CI** (`.github/` has only issue templates + a local Impeccable
-hook; no workflows).
+**CI exists** — `.github/workflows/ci.yml` runs the backend job (Python 3.12,
+Poetry, pyright, alembic upgrade/downgrade/upgrade + `alembic check`, pytest
+against postgres+redis service containers incl. the live queue smoke test) and
+the frontend job (Node 22, pnpm, test, `lint:ratchet`, build) on every PR.
 
 ---
 
 ## 6. Known pre-existing check failures (documented, not fixed in Phase 0)
 
-### `pnpm lint` — 19 errors, 6 warnings
+### `pnpm lint` — 16 errors, 6 warnings (ratcheted baseline)
 
-Runs with `--max-warnings 0`, so any finding fails. All are pre-existing
-(AGENTS.md explicitly calls this out). Breakdown:
-
-| Rule | Count | Files |
-|---|---|---|
-| `@typescript-eslint/no-explicit-any` | 18 | `components/agent/AgentActivity.tsx`, `components/commits/types.ts`, `generateCode.ts` |
-| `no-case-declarations` | 1 | `components/evals/BestOfNEvalsPage.tsx:215` |
-| `react-hooks/exhaustive-deps` | 4 (warnings) | `BestOfNEvalsPage.tsx`, `CodeMirror.tsx`, `Variants.tsx` |
-| `react-refresh/only-export-components` | 2 (warnings) | `ui/badge.tsx`, `ui/button.tsx` |
-
-**Severity:** low. Cosmetic/type-hygiene; no runtime impact. **Cause:** upstream
-never enforced lint in CI. **Action:** decide the lint-baseline policy when CI
-lands (fix-forward the `any`s, or start lint non-blocking and ratchet) — see
-TECHNICAL_DECISIONS.md D10.
+Raw `pnpm lint` runs with `--max-warnings 0`, so any finding fails. CI instead
+runs **`pnpm run lint:ratchet`**, which passes as long as the counts stay at or
+below `frontend/.lint-baseline.json` (`{"maxErrors": 16, "maxWarnings": 6}`).
+The baseline started at 19 errors (Batch 2) and has been lowered as pre-existing
+issues were fixed — **never raised**. Remaining are pre-existing
+`@typescript-eslint/no-explicit-any` (`AgentActivity.tsx`, `commits/types.ts`),
+one `no-case-declarations` (`BestOfNEvalsPage.tsx`), and `react-hooks` /
+`react-refresh` warnings. **Severity:** low; cosmetic/type-hygiene.
 
 ### `pnpm build` — large-bundle warning
 

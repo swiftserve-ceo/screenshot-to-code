@@ -17,7 +17,9 @@ from agent.providers.base import (
     ProviderSession,
     ProviderTurn,
     StreamEvent,
+    _log_token_usage,
 )
+from logging_config import get_logger
 from costs.pricing import MODEL_PRICING
 from costs.token_usage import TokenUsage
 from agent.tools import CanonicalToolDefinition, ToolCall
@@ -27,6 +29,8 @@ from llm import Llm
 
 
 DEFAULT_VIDEO_FPS = 10
+
+logger = get_logger("providers.gemini")
 
 
 def serialize_gemini_tools(tools: List[CanonicalToolDefinition]) -> List[types.Tool]:
@@ -152,7 +156,7 @@ def _extract_images_from_content(content: str | List[Dict[str, Any]]) -> List[Di
                 if detected_mime:
                     mime_type = detected_mime
                 else:
-                    print("Warning: Could not detect MIME type for data URL, skipping")
+                    logger.warning("could not detect MIME type for data URL; skipping")
                     continue
 
             images.append({"mime_type": mime_type, "data": base64_data})
@@ -397,8 +401,8 @@ class GeminiProviderSession(ProviderSession):
                     response.headers.get("content-type", "").split(";")[0].strip()
                 )
                 return response.content, content_type or part.mime_type
-            except Exception as exc:
-                print(f"[gemini] failed to fetch tool image {part.image_url}: {exc}")
+            except Exception:
+                logger.warning("failed to fetch tool image", exc_info=True)
         return None, part.mime_type
 
     async def append_tool_results(
@@ -447,11 +451,4 @@ class GeminiProviderSession(ProviderSession):
         u = self._total_usage
         model_name = _get_gemini_api_model_name(self._model)
         pricing = MODEL_PRICING.get(model_name)
-        cost_str = f" cost=${u.cost(pricing):.4f}" if pricing else ""
-        cache_hit_rate_str = f" cache_hit_rate={u.cache_hit_rate_percent():.2f}%"
-        print(
-            f"[TOKEN USAGE] provider=gemini model={model_name} | "
-            f"input={u.input} output={u.output} "
-            f"cache_read={u.cache_read} cache_write={u.cache_write} "
-            f"total={u.total}{cache_hit_rate_str}{cost_str}"
-        )
+        _log_token_usage("gemini", model_name, u, pricing)

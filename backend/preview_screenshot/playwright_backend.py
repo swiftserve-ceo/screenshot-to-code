@@ -8,7 +8,10 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from logging_config import get_logger
 from preview_screenshot.base import VIEWPORT_SIZES
+
+logger = get_logger("screenshot_preview")
 
 PAGE_LOAD_TIMEOUT_MS = 15000
 RENDER_SETTLE_MS = 250
@@ -48,12 +51,13 @@ class PlaywrightBackend:
         """
         try:
             await self._get_browser()
-            print("[screenshot_preview] Chromium available — tool enabled.")
+            logger.info("Chromium available — screenshot_preview tool enabled")
             return True
-        except Exception as exc:
-            print(
-                "[screenshot_preview] Chromium unavailable — tool disabled. "
-                f"Install it with `playwright install chromium`. Cause: {exc}"
+        except Exception:
+            logger.warning(
+                "Chromium unavailable — screenshot_preview tool disabled; "
+                "install it with `playwright install chromium`",
+                exc_info=True,
             )
             return False
 

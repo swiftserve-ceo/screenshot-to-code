@@ -10,6 +10,7 @@ from config import (
     REPLICATE_API_KEY,
 )
 from llm import Llm, OPENAI_MODELS, ANTHROPIC_MODELS, GEMINI_MODELS
+from logging_config import get_logger
 from agent.runner import Agent
 from fs_logging.agent_runs import AgentRunRecorder
 from prompts.create.image import build_image_prompt_messages
@@ -17,6 +18,8 @@ from prompts.create.text import build_text_prompt_messages
 from prompts.prompt_types import Stack
 from openai.types.chat import ChatCompletionMessageParam
 from typing import Any, List
+
+logger = get_logger("evals.core")
 
 
 async def _run_eval_agent(
@@ -45,7 +48,7 @@ async def _run_eval_agent(
     if model in OPENAI_MODELS and not OPENAI_API_KEY:
         raise Exception("OpenAI API key not found")
 
-    print(f"[EVALS] Using agent runner for model: {model.value}")
+    logger.info("eval agent run starting", extra={"model": model.value})
 
     recorder = AgentRunRecorder(
         generation_id=(

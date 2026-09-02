@@ -23,6 +23,9 @@ from fs_logging.agent_runs import (
     get_agent_runs_directory,
     open_index_db,
 )
+from logging_config import get_logger
+
+logger = get_logger("routes.agent_runs")
 
 router = APIRouter()
 
@@ -264,8 +267,8 @@ async def prune_agent_runs(request: PruneAgentRunsRequest) -> PruneAgentRunsResp
                 if not os.path.isdir(run_dir):
                     conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
             conn.commit()
-        except sqlite3.Error as e:
-            print(f"[AGENT RUN] Prune index cleanup failed: {e}")
+        except sqlite3.Error:
+            logger.warning("prune index cleanup failed", exc_info=True)
         finally:
             conn.close()
 

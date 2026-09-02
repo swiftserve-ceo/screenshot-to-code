@@ -50,7 +50,7 @@ engine itself is relatively mature and worth preserving.
 
 ```
 LG_Telecoms_App_Builder/
-├── backend/                     FastAPI app (Python, Poetry, pinned ^3.10)
+├── backend/                     FastAPI app (Python, Poetry, pinned ^3.12)
 │   ├── main.py                  App factory: registers routers, CORS(*), startup probes
 │   ├── config.py                Env-var config (NUM_VARIANTS=4, spend ceiling $3, flags)
 │   ├── start.py                 Dev entrypoint w/ auto free-port scan (7001..7020)
@@ -275,39 +275,141 @@ CORS is `allow_origins=["*"]` with `allow_credentials=True`
 
 ### 3.8 Security boundaries (current)
 
-- **No authentication or authorization anywhere.** Anyone who can reach the
-  backend can generate (spending the host's keys if set in `.env`), read/write
-  design systems, browse all prompt reports and agent runs, and trigger evals.
-- **Generated code is treated as trusted.** The frontend preview iframe has
-  **no `sandbox` attribute** (`PreviewComponent.tsx:290`, `iframe.srcdoc = html`),
-  so LLM-authored JS runs same-origin with the app and can read the app's
-  `localStorage` (which holds API keys). The backend renders the same HTML in
-  headless Chromium with network access.
-- **API keys from the browser** are sent as plaintext fields in the WebSocket
-  JSON payload on every request (`openAiApiKey`, etc.), and stored in
-  `localStorage`.
-- **`OPENAI_BASE_URL` override** is disabled when `IS_PROD` is truthy
-  (`generate_code.py:320`) — a deliberate SSRF/exfil guard.
+> **Updated after Phase 1 Remediation Batch 1 (2026-09-02)** — items marked
+> **[Batch 1]** changed; see `docs/REMEDIATION_LOG.md`.
+
+- **No end-user authentication or authorization.** Still true for the generation
+  and design-system surfaces. **[Batch 1]** the internal `/evals*`,
+  `/eval-sets*`, `/eval-sessions*`, `/prompt-reports*`, `/agent-runs*` endpoints
+  are now behind a **minimal operator gate** (`X-Operator-Token`, or
+  `OPERATOR_ENDPOINTS_PUBLIC=true` for local dev; 403 by default). This is a
+  stopgap, not the Phase 2 permission model.
+- **Generated code is still untrusted, and now sandboxed at the browser.**
+  **[Batch 1]** the preview iframe carries
+  `sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox"`
+  (**no `allow-same-origin`**); the variant thumbnail iframe uses
+  `sandbox="allow-scripts"`. Sandboxed page JS can no longer read the host
+  `localStorage` / cookies / DOM. Host ↔ preview interaction goes through an
+  injected bridge + validated `postMessage` channel. **The backend still renders
+  generated HTML in headless Chromium with `--no-sandbox` and network access —
+  unchanged, and still Phase 6 work.**
+- **API keys from the browser** are still sent as plaintext WebSocket fields and
+  stored in `localStorage` (Phase 2). They are now unreachable from the
+  (sandboxed) preview.
+- **[Batch 1] CORS** is an explicit allow-list (`CORS_ALLOWED_ORIGINS`, default =
+  local dev origins) — no more `allow_origins=["*"]` with credentials.
+- **[Batch 1] Config booleans** (`IS_PROD`, `IS_DEBUG_ENABLED`, …) use a strict
+  parser — `"false"` is no longer truthy.
+- **`OPENAI_BASE_URL` override** is disabled when `IS_PROD` is truthy — a
+  deliberate SSRF/exfil guard (preserved, now via typed settings).
 - **Good:** `/api/export` has real SSRF protection (`is_public_http_url` blocks
   private/loopback/link-local IPs, caps redirects, size, and count).
   `/agent-runs/{id}/assets/{filename}` guards path traversal via `basename` +
   realpath containment. Uploaded assets are size-capped (20 MB) and
   MIME-allowlisted.
 - **Secrets hygiene:** `.env`, `frontend/.env.local`, `.playwright-cli/` are
-  git-ignored. No secrets found committed. `pyproject.toml` still carries the
-  upstream author's email; `routes/generate_code.py` contains a
-  `support@getwhimsyworks.com` address and `Troubleshooting.md` upstream support
-  language — cosmetic, out of scope for discovery.
+  git-ignored; `backend/.env.example` documents every setting without values.
+  **[Batch 1]** the user-facing `support@getwhimsyworks.com` string in a
+  generation error path was removed.
 
 ### 3.9 Observability (current)
 
-- `print()`-based logging throughout (no structured logger, no log levels).
-- Rich **opt-in** run capture (`PROMPT_REPORTS_ENABLED=1`): every LLM request
-  payload, every tool call + result, every stream delta, token usage, cost, and
-  a self-contained HTML+assets snapshot per run, indexed in SQLite and browsable
-  at `/evals/agent-runs` and `/evals/prompt-reports`.
-- `langfuse` is a dependency but no active integration was found in the codebase.
-- No metrics, no tracing spans, no health/readiness beyond `GET /`.
+> **Updated after Phase 1 Remediation Batch 1.**
+
+- **[Batch 1] Structured logging** (`backend/logging_config.py`): one configured
+  `app` logger, `console` (key=value) or `json` output (`LOG_FORMAT`), level from
+  `LOG_LEVEL`, a UTF-8-safe stream that can never crash on content, and a
+  `contextvars` `request_id` on every record. uvicorn's loggers are routed
+  through it. `RequestContextMiddleware` assigns/echoes `X-Request-ID` per HTTP
+  request; the WebSocket generation handler binds its own correlation id.
+- Runtime `print()` sites are migrated (generation pipeline, agent tools, startup
+  probe, provider token accounting, `fs_logging/*`, `routes/export`+`agent_runs`,
+  `image_generation`, `evals/core`+`sets`, startup probe). Genuine CLI scripts
+  (`evals/runner.py`, the benchmark) keep stdout.
+- Rich **opt-in** run capture (`PROMPT_REPORTS_ENABLED`) is unchanged.
+- `GET /health` reports `{status, checks:{database, redis, worker},
+  job_queue_enabled}` without leaking connection strings (worker liveness from
+  arq's health-check key; `degraded` when the queue is on and no worker); `GET /`
+  liveness string unchanged. Jobs carry `job_id` + `request_id` + `worker` +
+  transition + `attempt` in structured logs. `POST /api/jobs/{id}/cancel` is the
+  explicit-cancel trigger; `reap_jobs` (cron) fails jobs stuck `running`.
+- Still no metrics, no distributed tracing backend (Phase 10) — only the
+  correlation seam. `langfuse` remains an unused dependency.
+
+---
+
+### 3.10 Infrastructure foundation (added Batch 2)
+
+> New in Phase 1 Remediation Batch 2. Wraps the engine; **generation is not yet
+> on the queue.**
+
+| Piece | What exists | Where |
+|---|---|---|
+| **PostgreSQL** | `postgres:16` compose service (health check, `pgdata` volume, `127.0.0.1:5435`). Async SQLAlchemy 2.0 + `asyncpg`; `session_scope()` transactional context; non-fatal `check_database()`. **Optional** — no `DATABASE_URL` ⇒ app still starts, sync generation works. | `backend/db/` |
+| **Alembic** | Async `env.py` (URL from typed settings, no committed credentials); one baseline migration = **only** the `jobs` table. `upgrade ↔ downgrade` round-trips clean. | `backend/alembic.ini`, `backend/migrations/` |
+| **Redis** | `redis:7` compose service (health check, `127.0.0.1:6379`). Async client + non-fatal `check_redis()`. | `backend/redis_client.py` |
+| **Worker** | **arq** (`arq worker.WorkerSettings`) — asyncio-native (D3 ratified). `ping` + generic `execute_job`; bounded arq-native retries with **non-retryable classification** (`JOB_MAX_ATTEMPTS`); `job_timeout` watchdog; clean startup/shutdown. Handler registry = **`{noop, generation}`** — `generation` calls the existing agent/provider layer only; no shell/subprocess/docker/exec (AST-tested). | `backend/worker.py` |
+| **Job model** | `jobs` table + `JobService` state machine (`queued→running→succeeded/failed/cancelled`, retry = `running→queued`, un-runnable = `queued→failed`). Durable state in Postgres; **no tenant/user/org/billing columns**. | `backend/jobs/` |
+| **Event channel** | `JobEventChannel` — Redis pub/sub per job **plus** a TTL'd, `seq`-stamped backlog list (`jobs:eventlog:<id>`) for replay/reconnect. `open_subscription` subscribes-then-replays with dedup. | `backend/jobs/events.py` |
+| **CI** | GitHub Actions: backend (py3.12, pyright, alembic round-trip, pytest w/ Postgres+Redis service containers) + frontend (node22, jest, build, lint ratchet). | `.github/workflows/ci.yml` |
+
+---
+
+### 3.11 Queued generation (added Batch 3)
+
+> **One** generation path — **text → create** — now runs API→queue→worker→events,
+> behind `JOB_QUEUE_ENABLED` (default **off**). All other paths are unchanged and
+> synchronous.
+
+```
+Text-tab Generate
+  → WS /generate-code : QueuedGenerationMiddleware
+      → JobService.create("generation", params=sanitised[no keys])   [Postgres]
+      → arq enqueue "execute_job"                                    [Redis]
+      → WS: { jobCreated: <job_id> } + "Queued..."
+  ── client may disconnect here; the job is independent ──
+  worker execute_job
+      → JOB_HANDLERS["generation"] → generation.run_generation(req, ProviderCredentials.from_settings, emit)
+      → publishes generation + lifecycle events → JobEventChannel    [Redis backlog + pub/sub]
+  WS relay: open_subscription → replay backlog → tail live → terminal close
+```
+
+| Concern | Where | Notes |
+|---|---|---|
+| Generation adapter | `backend/generation/` | `variants.py` (moved `AgenticGenerationStage`), `model_selection.py` (extracted pure selector), `service.py` (`run_generation`), `types.py` (DTOs — **no secrets**), `job.py` (arq handler) |
+| WS relay | `backend/routes/generation_relay.py` | `start_queued_generation` / `resume_job` / `_relay`; translates `JobEvent` → existing frontend messages; client disconnect ≠ cancel |
+| Job status API | `backend/routes/jobs.py` | `GET /api/jobs/{id}` — safe fields only; `POST /api/jobs/{id}/cancel` — QUEUED→cancelled / RUNNING→cancelled+arq abort / terminal→409 |
+| Reconnect | `frontend/src/generateCode.ts` | transparent re-attach with `{jobId}` on an unexpected drop (≤5, backoff) |
+| Credentials | server env only | browser keys stripped; **limitation** — browser-entered keys don't reach the queued path (Phase 2) |
+| Result | Redis event backlog (2 h TTL) | no `job_results` table; durable project store is Phase 2 |
+
+**Batch 4 hardening on this path:** the WS relay emits **exactly one** terminal
+`error` (`_Forwarder._error_sent` — no friendly + sanitised double); the worker
+**hard-disables `screenshot_preview`** so it cannot render/execute generated
+code; `RUNNING→RUNNING` is legal so a fresh worker re-acquires a job whose worker
+was killed pre-terminal (never falsely `succeeded`); an enqueue/DB failure marks
+the job `FAILED` and returns one clean client error instead of hanging.
+
+### 3.12 Model registry + platform hardening (added Batch 4)
+
+```
+backend/model_registry/           derived from llm.py + costs.pricing (cannot drift)
+  types.py     ModelEntry (frozen), Provider/Modality/Capability/ModelStatus enums
+  registry.py  MODEL_REGISTRY[Llm], REPLICATE_REGISTRY[str], lookups, frontend_model_catalog()
+GET /api/models → { providers[], models[ to_public_dict() ] }   # no api_name, no pricing, no keys
+
+agent/providers/factory.py   → provider_of(model)          (was: OPENAI_MODELS/… set membership)
+generation/model_selection.py→ drops registry-disabled models before selection
+```
+
+| Area | Change |
+|---|---|
+| Python | `^3.12` everywhere (pyproject / `.python-version` / pyright / Dockerfile / CI); local 3.13 still allowed |
+| Lifespan | `main.py` uses one `@asynccontextmanager lifespan()`; no `@app.on_event` |
+| Config | remaining `os.environ` reads in app code → `config.settings` (`evals/config`, `design_systems`, `prompt_reports`) |
+| Job retention | opt-in `JOB_RETENTION_DAYS` → daily `prune_jobs` cron; terminal rows only, never queued/running |
+| Logging | runtime `print()`s → structured `app` logger (provider token usage, `fs_logging/*`, `routes/export` + `agent_runs`, `image_generation`, `evals/core`+`sets`) |
+| CI | `alembic check` drift gate + `tests/test_queue_smoke.py` real burst-worker round-trip |
 
 ---
 
@@ -534,13 +636,16 @@ resolved during PHASE 1 spikes, not now.
    `project-store.ts`. Server-side project modelling is entirely new.
 4. **Model choice is deploy-time config.** Updating the model mix is a code
    change informed by manual eval sessions (see `git log`). Fine for one team,
-   not for per-org customization.
+   not for per-org customization. *(Batch 4: `backend/model_registry/` now gives
+   this a typed, testable, frontend-discoverable shape — but it is still set at
+   import time; no runtime/admin toggle.)*
 5. **Single-tenant assumptions everywhere** — global design-systems file, global
    asset dir, global eval/telemetry endpoints, `user_id` params that are accepted
    but ignored locally.
-6. **Python `^3.10`** pinned; upstream Docker uses 3.12; this Windows checkout
-   ran clean on 3.13 (see LOCAL_DEVELOPMENT.md). `moviepy 1.0.3`, `pillow`,
-   `openai 2.16.0` (exact pin), `anthropic ^0.84`, `google-genai ^1.16`.
+6. **Python `^3.12`** pinned (Batch 4; was `^3.10`). CI runs 3.12; local 3.13
+   still satisfies the constraint and works (see LOCAL_DEVELOPMENT.md).
+   `moviepy 1.0.3`, `pillow`, `openai 2.16.0` (exact pin), `anthropic ^0.84`,
+   `google-genai ^1.16`.
 7. **MIT license and upstream attribution must be preserved** (LICENSE,
    `pyproject.toml` author field, README credits).
 

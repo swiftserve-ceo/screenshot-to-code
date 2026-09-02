@@ -1,5 +1,9 @@
 import re
 
+from logging_config import get_logger
+
+logger = get_logger("codegen")
+
 
 def extract_html_content(text: str) -> str:
     file_match = re.search(
@@ -27,7 +31,5 @@ def extract_html_content(text: str) -> str:
         return match.group(1)
     else:
         # Otherwise, we just send the previous HTML over
-        print(
-            "[HTML Extraction] No <html> tags found in the generated content"
-        )
+        logger.debug("no <html> tags found in generated content; returning as-is")
         return text

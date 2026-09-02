@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from codegen.utils import extract_html_content
 from config import REPLICATE_API_KEY
+from logging_config import get_logger
 from agent.tools.extract_assets import run_extract_assets
 from agent.tools.local_assets import guess_image_mime, local_asset_url_to_data_url
 from agent.tools.screenshot_preview import run_screenshot_preview
@@ -21,6 +22,8 @@ from agent.state import AgentFileState, ensure_str
 from agent.tools.types import ToolCall, ToolExecutionResult, ToolMultimodalPart
 from agent.tools.summaries import summarize_text
 
+
+logger = get_logger("agent.tools.runtime")
 
 IMAGE_TOOL_BATCH_SIZE = 20
 
@@ -366,7 +369,7 @@ class AgentToolRuntime:
         results: List[Dict[str, Any]] = []
         for url, raw in zip(unique_urls, raw_results):
             if isinstance(raw, BaseException):
-                print(f"Background removal failed for {url}: {raw}")
+                logger.warning("background removal failed", extra={"url": url, "error": repr(raw)})
                 results.append(
                     {"image_url": url, "result_url": None, "status": "error"}
                 )
@@ -487,7 +490,10 @@ class AgentToolRuntime:
             for index, raw in zip(batch_indexes, raw_results):
                 item = results[index]
                 if isinstance(raw, BaseException):
-                    print(f"Image edit failed for {item['image_urls']}: {raw}")
+                    logger.warning(
+                        "image edit failed",
+                        extra={"image_urls": item["image_urls"], "error": repr(raw)},
+                    )
                     item["status"] = "error"
                     item["error"] = str(raw)
                 else:

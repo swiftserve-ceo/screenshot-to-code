@@ -32,6 +32,10 @@ import time
 
 from PIL import Image
 
+from logging_config import get_logger
+
+logger = get_logger("providers.anthropic.image")
+
 # Hard API limit: 5 MB per image (base64-encoded).
 CLAUDE_IMAGE_MAX_SIZE = 5 * 1024 * 1024
 
@@ -113,6 +117,6 @@ def process_image_bytes(
 
     end_time = time.time()
     processing_time = end_time - start_time
-    print(f"[CLAUDE IMAGE PROCESSING] processing time: {processing_time:.2f} seconds")
+    logger.debug("claude image processed", extra={"processing_seconds": round(processing_time, 2)})
 
     return ("image/jpeg", base64.b64encode(output.getvalue()).decode("utf-8"))

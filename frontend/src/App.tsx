@@ -25,10 +25,7 @@ import {
 import { useAppStore } from "./store/app-store";
 import { useProjectStore } from "./store/project-store";
 import { useDesignSystems } from "./hooks/useDesignSystems";
-import {
-  buildSelectedElementInstruction,
-  describeElementContext,
-} from "./components/select-and-edit/utils";
+import { buildSelectedElementInstruction } from "./components/select-and-edit/utils";
 import { useEscapeToExitSelectMode } from "./components/select-and-edit/useEscapeToExitSelectMode";
 import Sidebar from "./components/sidebar/Sidebar";
 import IconStrip from "./components/sidebar/IconStrip";
@@ -564,6 +561,12 @@ function App() {
         finishInFlightEvents("complete");
         setAppState(AppState.CODE_READY);
       },
+      // Batch 3: text→create may run as a queued background job. Reconnect on a
+      // dropped socket is handled inside generateCode; we just surface the id.
+      onJobCreated: (jobId) => {
+        console.log(`Generation queued as job ${jobId}`);
+        appendExecutionConsole(0, `Queued as job ${jobId}`);
+      },
     });
   }
 
@@ -698,17 +701,14 @@ function App() {
     let modifiedUpdateInstruction = updateInstruction;
     let selectedElementHtml: string | undefined;
 
-    // Send in a reference to the selected element if it exists. Selection
-    // visuals are overlays, so the element's outerHTML is already clean.
+    // Send in a reference to the selected element if it exists. The bridge
+    // captures a clean outerHTML snapshot plus a DOM-context description.
     if (selectedElement) {
-      const elementHtml = selectedElement.outerHTML;
-      selectedElementHtml = elementHtml;
+      selectedElementHtml = selectedElement.outerHTML;
       modifiedUpdateInstruction = buildSelectedElementInstruction(
         updateInstruction,
-        elementHtml,
-        selectedElement.isConnected
-          ? describeElementContext(selectedElement)
-          : undefined
+        selectedElement.outerHTML,
+        selectedElement.context || undefined
       );
       setSelectedElement(null);
     }

@@ -442,6 +442,9 @@ function EvalComparePage() {
                   src={`${HTTP_BACKEND_URL}/agent-runs/${encodeURIComponent(
                     pane.run!.run_id
                   )}/output`}
+                  // Renders untrusted generated HTML: scripts only, never
+                  // "allow-same-origin".
+                  sandbox="allow-scripts"
                   className={`absolute inset-0 h-full w-full bg-white ${
                     isActive ? "visible" : "invisible"
                   }`}

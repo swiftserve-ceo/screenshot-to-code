@@ -1,0 +1,5 @@
+{
+  "_comment": "Ratchet baseline for scripts/lint-ratchet.mjs. CI fails if lint errors/warnings EXCEED these counts (a regression), and nags to lower them when the real count drops. Lower these numbers as pre-existing lint debt (BASELINE_FUNCTIONAL_AUDIT KF-9) is paid down. Goal: 0/0. History: 19/6 (Batch 2) -> 16/6 (Batch 3: generateCode.ts any-casts annotated).",
+  "maxErrors": 16,
+  "maxWarnings": 6
+}

@@ -16,7 +16,11 @@ function createGeneratingCommit(): Commit {
 }
 
 describe("version navigation", () => {
-  const selectedElement = { tagName: "BUTTON" } as HTMLElement;
+  const selectedElement = {
+    tagName: "button",
+    outerHTML: "<button>x</button>",
+    context: "Element location: button",
+  };
 
   beforeEach(() => {
     useProjectStore.setState({ head: "latest" });

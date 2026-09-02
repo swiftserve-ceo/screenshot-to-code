@@ -186,21 +186,28 @@ Trade-offs · Migration implications.**
   customers who require physical isolation (could offer database-per-org as a
   tier).
 
-### D3. *PROPOSED* — Job queue: Redis + a Python task runner (Celery or Dramatiq/arq)
+### D3. RATIFIED (Batch 2) — Job queue: Redis + **arq** (asyncio-native task runner)
 
-- **Decision:** Redis-backed queue; generation, QA, and deploy run as jobs on
-  worker processes; the API only enqueues and streams events.
-- **Rationale:** decouples run lifetime from the socket; enables retries,
-  concurrency limits, priority, and per-tenant fairness; Redis is also needed for
-  caching/pub-sub/rate-limits.
-- **Alternatives considered:** keep everything in the request (status quo —
-  fragile); a cloud queue (SQS/PubSub — vendor lock, harder local dev);
-  Temporal (great fit for the multi-stage pipeline, but heavy to introduce now —
-  revisit at Phase 5).
-- **Trade-offs:** a new moving part; exactly-once vs. at-least-once semantics to
-  design around; local dev needs Redis + a worker.
-- **Migration implications:** introduced in Phase 1 behind a flag for one code
-  path, expanded per phase.
+- **Decision:** Redis-backed queue via **arq**. Generation (later), QA, and
+  deploy run as jobs on worker processes started with
+  `arq worker.WorkerSettings`; the API only enqueues and (later) streams events
+  via a Redis pub/sub `JobEventChannel`. Durable job state (`jobs` table) is in
+  Postgres; Redis carries only transient queue/coordination + event fan-out.
+- **Rationale for arq over Celery / Dramatiq:** the generation engine is fully
+  `async` (`AgentEngine.run()` awaits; `asyncio.gather` fans out variants). arq
+  is asyncio-native — the worker `await`s the existing engine directly with no
+  sync/async bridging. It is Redis-only (already required), minimal, pinned to
+  the pydantic family. Celery / Dramatiq are sync-first and would force
+  `asgiref`/thread bridging of the async engine.
+- **Alternatives considered:** Celery (heavy, sync-first, needs a result
+  backend); Dramatiq (lighter but sync-first); a cloud queue (vendor lock,
+  harder local dev); Temporal (great fit for the multi-stage pipeline, heavy to
+  introduce now — revisit at Phase 5).
+- **Trade-offs:** arq is smaller-community than Celery; at-least-once semantics
+  (a handler must be idempotent-safe); local dev needs Redis + a worker process.
+- **Migration implications:** Batch 2 built the worker + job model + event
+  channel with a `noop` test handler only. Generation moves onto it in the next
+  batch behind `JOB_QUEUE_ENABLED` (default false).
 
 ### D4. *PROPOSED* — Object storage: S3-compatible (MinIO in dev)
 
@@ -229,17 +236,19 @@ Trade-offs · Migration implications.**
 - **Migration implications:** none existing — but **removing browser-held
   provider keys (A6) is a prerequisite** and lands in the same phase.
 
-### D6. *PROPOSED* — Pin Python 3.12 for dev + CI
+### D6. RATIFIED (Batch 4) — Python 3.12 is the target for dev + CI
 
-- **Decision:** standardize on CPython 3.12 (matches upstream Docker); document
-  it in LOCAL_DEVELOPMENT.md; add a CI matrix entry.
-- **Rationale:** the codebase is pinned `^3.10` and *tested* by upstream on 3.12;
-  3.13/3.14 are untested (3.13 happened to pass here — not a guarantee, e.g.
-  `moviepy 1.0.3`).
-- **Alternatives considered:** adopt 3.13 now (works today, risk later);
-  stay on whatever is installed (non-reproducible).
-- **Trade-offs:** contributors on 3.13/3.14 need pyenv/uv to get 3.12.
-- **Migration implications:** none code-wise; a dev-environment + CI change.
+- **Decision:** CPython 3.12 is the standard. `backend/pyproject.toml` requires
+  `python = "^3.12"`; `backend/.python-version` pins `3.12`;
+  `pyrightconfig.json` sets `pythonVersion` `3.12`; `backend/Dockerfile` is
+  `python:3.12-slim-bookworm`; CI (`.github/workflows/ci.yml`) runs the backend
+  job on `3.12` (`PYTHON_VERSION`).
+- **Not forced locally.** `^3.12` also admits 3.13/3.14, so a contributor's
+  existing 3.13 venv keeps working — no uninstall/reinstall required. CI is the
+  authority: it always runs 3.12, so 3.12 is what must stay green.
+- **Lock impact:** regenerating `poetry.lock` under `^3.12` only dropped the
+  now-unreachable backports (`async-timeout`, `exceptiongroup`, `tomli`); no
+  runtime dependency changed.
 
 ### D7. *PROPOSED* — Sandbox tier: Docker containers first, evaluate microVMs later
 
@@ -286,18 +295,326 @@ Trade-offs · Migration implications.**
 - **Trade-offs:** two state systems to reason about (already true today).
 - **Migration implications:** incremental, screen by screen.
 
-### D10. *PROPOSED* — CI from Phase 1: GitHub Actions running the existing baseline checks
+### D10. RATIFIED (Batch 2, hardened Batch 4) — CI on GitHub Actions
 
-- **Decision:** a CI workflow runs `poetry run pytest`, `poetry run pyright`
-  (backend) and `pnpm lint && pnpm test && pnpm build` (frontend) on every PR,
-  Python pinned to 3.12, Node to 22, pnpm to the `packageManager` version.
-- **Rationale:** there is **no CI today**; the checks already exist and pass;
-  every later phase needs a green gate.
-- **Alternatives considered:** none reasonable.
-- **Trade-offs:** `pnpm lint` currently fails on 19 pre-existing errors (see
-  discovery summary) — CI must either fix-forward those first or start with lint
-  non-blocking and ratchet.
-- **Migration implications:** decide the lint-baseline policy when CI lands.
+- **Decision:** `.github/workflows/ci.yml` runs on every PR + pushes to `main` /
+  the foundation branch. **backend** job: Python 3.12, Poetry 2.4.2 (pipx),
+  `.venv` cache, `pyright`, `alembic upgrade → downgrade base → upgrade`,
+  `alembic check` (model-drift gate, added Batch 4), then `pytest -q` with
+  `REQUIRE_INFRA=1` against `postgres:16-alpine` + `redis:7-alpine` service
+  containers — which makes `tests/test_queue_smoke.py` a real
+  API→Redis→burst-worker→terminal-state check (added Batch 4). **frontend** job:
+  Node 22, Corepack pnpm (pinned via `packageManager`), `pnpm test`,
+  `pnpm run lint:ratchet`, `pnpm build`.
+- **Credentials:** only throwaway values (`appbuilder`/`appbuilder`, loopback
+  URLs). No provider API keys, no real secrets — the queued path's controlled
+  "no key" failure is what the tests exercise.
+- **Lint policy:** ratchet against `frontend/.lint-baseline.json`
+  (`maxErrors`/`maxWarnings`), lowered as pre-existing issues are fixed — never
+  raised.
+
+---
+
+## Part C — Decisions made during remediation
+
+> These were implemented in **Phase 1 Remediation Batch 1 (2026-09-02)**. See
+> `docs/REMEDIATION_LOG.md` for the full problem → root cause → change record.
+
+### C1. DECIDED — Preview iframe sandboxing + postMessage bridge
+
+- **Decision:** the preview iframe is sandboxed with
+  `allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox`
+  (**no `allow-same-origin`**). All host ↔ preview interaction (element
+  selection for select-and-edit, overlays) goes through an injected bridge
+  script (`preview-bridge.js`) and a validated `postMessage` channel; the host
+  never touches the iframe's DOM. `selectedElement` is a serialized
+  `{ tagName, outerHTML, context }` snapshot, not a live node.
+- **Rationale:** closes audit SF-1/SF-2 — sandboxed generated code could read the
+  host's `localStorage` (API keys). This is the Phase 1 "quick win"; full
+  execution isolation is Phase 6.
+- **Alternatives:** keep same-origin preview (status quo — unsafe); build the
+  bridge as a separate Vite entry loaded by URL (heavier; network dependency for
+  the preview).
+- **Trade-offs:** the bridge carries a hand-kept plain-JS mirror of
+  `select-and-edit/overlays.ts` + `utils.ts` (can't import TS into an injected
+  string).
+
+### C2. DECIDED — CORS is an explicit allow-list
+
+- **Decision:** `CORS_ALLOWED_ORIGINS` (comma-separated), defaulting to the local
+  dev origins. No wildcard; `allow_credentials=True` is retained (now safe).
+- **Rationale:** closes audit SF-3.
+- **Migration implications:** non-default deployments set `CORS_ALLOWED_ORIGINS`.
+
+### C3. DECIDED — Minimal operator gate on internal endpoints
+
+- **Decision:** `/evals*`, `/eval-sets*`, `/eval-sessions*`, `/prompt-reports*`,
+  `/agent-runs*` require an `X-Operator-Token` header when `OPERATOR_TOKEN` is
+  set; are open when `OPERATOR_ENDPOINTS_PUBLIC=true`; otherwise return 403
+  (closed by default).
+- **Rationale:** closes audit SF-4 ("accidental unrestricted exposure"). This is
+  **not** authentication/authorization — the real per-user/per-org model is
+  Phase 2.
+- **Trade-offs:** local use of the eval UI now needs an env var. (Those pages
+  were already broken via `pnpm dev` — audit KF-3 — so no working feature
+  regresses.)
+
+### C4. DECIDED — Strict environment-variable boolean parsing
+
+- **Decision:** `env_bool()` accepts only `1/true/yes/on/y/t` (true) and
+  `0/false/no/off/n/f`/empty/unset (false); anything else raises at startup.
+- **Rationale:** closes audit SF-8 — `bool(os.environ.get(...))` made `"false"`
+  truthy for `IS_PROD` / `IS_DEBUG_ENABLED`.
+
+### C11. *PROPOSED* — Typed config on `pydantic` v2 `BaseModel` (not `pydantic-settings`) for now
+
+- **Decision:** `backend/config.py` builds a validated `Settings` model via
+  `Settings.from_env()`, keeping the existing module-level constant names for
+  backward compatibility. Env reading is a thin helper layer (`env_bool`,
+  `env_int`, `env_float`, `env_list`, `env_str`).
+- **Rationale:** `pydantic` v2 is already a dependency; this adds **no new
+  runtime dependency** and is offline-safe. Satisfies spec FR-C1..C6 (typed,
+  validated, single module, fail-fast, no scattered `os.environ`).
+- **Alternatives:** `pydantic-settings` (the "standard" choice; adds a dependency;
+  swap later is mechanical); a bespoke dataclass loader (reinvents validation).
+- **Trade-offs:** no `.env` nested parsing / `SettingsConfigDict` niceties yet.
+- **Migration implications:** a few scattered `os.environ` reads remain
+  (`evals/config.py`, `routes/design_systems.py`, `routes/screenshot.py`) — moved
+  to `Settings` in a later batch. Adopting `pydantic-settings` remains open.
+
+### C14. DECIDED (Batch 2) — PostgreSQL dev harness: async SQLAlchemy 2.0 + asyncpg + Alembic
+
+- **Decision:** `backend/db/` is an async SQLAlchemy 2.0 layer (`asyncpg`
+  driver): a lazy engine with `pool_pre_ping`, a `session_scope()` transactional
+  context manager, `dispose_engine()`, and a non-fatal `check_database()` probe.
+  Alembic (`backend/alembic.ini` + `backend/migrations/`, async `env.py`) reads
+  the URL from the typed settings — **no credentials in a committed file**. One
+  baseline migration creates only the `jobs` infrastructure table.
+- **Rationale:** FastAPI + the health route + arq are all async; async DB avoids
+  thread-pool bridging. The DB is **optional** this phase — no `DATABASE_URL` →
+  the app still starts and the sync generation path works.
+- **Alternatives:** sync SQLAlchemy + `psycopg` (simpler Alembic, but forces
+  `to_thread` in async handlers); no ORM (reinvents migrations).
+- **Trade-offs:** async Alembic env is slightly more code; `asyncpg` is a
+  compiled dependency.
+- **Migration implications:** Phase 2 adds domain tables (users, orgs, projects,
+  …) and tenancy columns via new migrations; `db/` is the foundation they build
+  on. `evals/config.py` and a couple of route modules still read `os.environ`
+  directly — folded into `Settings` in a later batch.
+
+### C15. DECIDED (Batch 2) — Job model in Postgres, event fan-out in Redis
+
+- **Decision:** the `jobs` table (`backend/jobs/models.py`) holds durable
+  lifecycle state (`queued|running|succeeded|failed|cancelled`, timestamps,
+  `attempt`/`max_attempts`, `error` summary, `request_id`, `worker`, `params`
+  JSONB, `result_ref`). `JobService` enforces the transition table (spec JL-2).
+  `JobEventChannel` publishes `JobEvent`s over Redis pub/sub (`jobs:events:<id>`).
+- **Scope guard:** **no tenant / user / org / billing columns** (spec FR-E7 /
+  FR-F15) — a test asserts this. `result_ref` is a *pointer* to where output
+  lives, never the output; `error` is a truncated summary, never a payload.
+- **Rationale:** Postgres for durability + queryability (spec JL-7, "terminal
+  state retrievable independently of the socket"); Redis for cheap transient
+  event fan-out (spec A-8, DR-4 — losing Redis loses in-flight queue state but
+  never corrupts Postgres).
+- **Migration implications:** additive-only. Phase 2 adds `project_id` /
+  tenancy columns via migration; Phase 7 adds AI-session linkage.
+
+### C16. DECIDED (Batch 2) — CI on GitHub Actions + a lint ratchet
+
+- **Decision:** `.github/workflows/ci.yml` — a `backend` job (Python 3.12,
+  Poetry 2.4.2, pyright, Alembic up/down/up round trip, pytest against Postgres
+  + Redis service containers with `REQUIRE_INFRA=1`) and a `frontend` job
+  (Node 22, pnpm 10.32.1 via corepack, `pnpm test`, `pnpm build`, lint ratchet),
+  with dependency caching keyed on the lockfiles.
+- **Lint policy (resolves KF-9 / D10's open question):** a **ratchet**, not a
+  freeze and not a fix-all-first. `frontend/.lint-baseline.json` records the
+  current debt (`maxErrors: 19, maxWarnings: 6`); `scripts/lint-ratchet.mjs`
+  prints the full report, **fails on any increase**, and nags to lower the
+  baseline when the count drops. Move toward 0/0 incrementally.
+- **Rationale:** blocking CI on 19 inherited errors would stall the project or
+  invite blanket `// eslint-disable`. The ratchet prevents new debt immediately
+  while keeping the path to clean.
+- **Trade-offs:** the baseline file is a small piece of state to keep honest;
+  CI not yet verified on a real GitHub run (no push this batch).
+
+### C17. DECIDED (Batch 2) — WebSocket transition boundary
+
+- **Decision:** `JobEventChannel` (Redis pub/sub) is the seam between *job
+  execution* and *event delivery*. The existing `/generate-code` WebSocket is
+  **unchanged** this batch. Next batch: the API enqueues a generation job, the
+  worker runs the existing `AgentEngine` and publishes events to the channel, and
+  a WebSocket subscribes to the channel and relays them — so the socket lifetime
+  no longer bounds the job (spec FR-F7/F8). Terminal state is always readable
+  from the `jobs` table.
+- **Rationale:** separating the two concerns is the whole point of the queue
+  work; defining the boundary now lets the next batch be a focused, reversible
+  change behind `JOB_QUEUE_ENABLED`.
+- **Deferred:** the real-time transport choice for *collaboration* (WS vs SSE vs
+  CRDT) stays deferred; this is only about generation event delivery.
+
+### C18. DECIDED (Batch 3) — First migrated generation path: text → create
+
+- **Decision:** only `inputMode="text"` + `generationType="create"` runs through
+  the Redis/arq worker, and only when `JOB_QUEUE_ENABLED=true` (default false).
+  Everything else — image / multi-image / URL / video / **update/edit** — stays
+  on the synchronous `routes/generate_code.py` pipeline.
+- **Rationale:** smallest real path (no screenshots / video / asset extraction /
+  file-state), so the API→job→queue→worker→event→WS architecture can be proven
+  with a minimal, reversible change. `AgenticGenerationStage` and model selection
+  were *extracted* (behaviour-preserving), not rewritten — one implementation
+  serves both paths.
+- **Migration implications:** later batches move the remaining paths the same
+  way; the sync pipeline is retired only once every path has a queued equivalent
+  and parity is proven.
+
+### C19. DECIDED (Batch 3) — Generation result = the Redis event backlog, not a table
+
+- **Decision:** the worker publishes every generation event (`setCode`,
+  `variantComplete`, …) to `jobs:eventlog:<id>` (a TTL'd, capped Redis list). A
+  reconnecting client replays that list to rebuild the output. `jobs.result_ref`
+  is just the pointer string `eventlog:<id>`. **No `job_results` / `job_events`
+  table was added.**
+- **Rationale:** the generated code is already carried by the existing `setCode`
+  event; persisting it a second time in Postgres would duplicate data and force a
+  schema addition this batch explicitly tries to avoid. The 2 h TTL matches the
+  "recover from a transient disconnect" use case; durable project persistence is
+  Phase 2.
+- **Trade-offs:** a job's output is unavailable after the TTL (the `jobs` row
+  still records that it succeeded/failed). Phase 2's project store is the durable
+  home for generated code.
+
+### C20. DECIDED (Batch 3) — Queued path uses server-configured provider keys only
+
+- **Decision:** `build_generation_request` strips `openAiApiKey` / `anthropicApiKey`
+  / `geminiApiKey` / `replicateApiKey` / `openAiBaseURL` / `screenshotOneApiKey`
+  from the browser payload before anything is persisted or enqueued. The worker
+  resolves credentials from `settings` (server env) at execution time via
+  `ProviderCredentials.from_settings` and never serialises them.
+- **Rationale:** spec §5 — no secrets in Redis jobs, DB job params, WS payloads,
+  logs, or frontend state. A short-lived secret store keyed by job id is a
+  Phase 2 (per-tenant secrets manager) concern.
+- **Trade-off / limitation:** a developer who only sets provider keys in the
+  browser Settings dialog gets the controlled "No API key" error on the queued
+  text→create path (the sync path still honours browser keys). Documented in
+  LOCAL_DEVELOPMENT.md.
+
+### C12. DECIDED — Structured logging + request/trace correlation groundwork
+
+- **Decision:** `backend/logging_config.py` provides one configured `app` logger
+  with structured output (`console` key=value or `json`, via `LOG_FORMAT`), a
+  level from `LOG_LEVEL`, a UTF-8-safe stream (`errors="backslashreplace"` — can
+  never raise on content), and a `contextvars` `request_id` injected into every
+  record. `RequestContextMiddleware` assigns/propagates the id per HTTP request
+  and echoes `X-Request-ID`; the WebSocket generation handler binds its own.
+- **Rationale:** spec FR-D1..D8 / constitution Principle X. Also fixes audit
+  KF-1/KF-2: `print` of box-drawing characters on a cp1252 stdout raised
+  `UnicodeEncodeError` and crashed generation / startup.
+- **Scope:** highest-risk paths migrated this batch (generation pipeline, agent
+  tools, startup probe); non-hot routes, `fs_logging/*`, provider debug dumps and
+  intentional CLI/eval stdout deferred to later batches.
+- **Not adopted yet:** a distributed-tracing backend (Phase 10) — only the
+  correlation seam is in place. `structlog` was not added; stdlib `logging`
+  suffices.
+- **Batch 4 follow-through:** the remaining runtime `print()`s were migrated —
+  provider token-usage accounting (`_log_token_usage` in
+  `agent/providers/base.py`), `fs_logging/*`, `routes/export.py` (incl. the
+  SSRF-guard "asset skipped" lines), `routes/agent_runs.py`,
+  `image_generation/generation.py`, `evals/core.py` + `evals/sets.py` (both
+  reachable from operator routes), and `debug/DebugFileWriter.py`. Genuine CLI
+  scripts (`evals/runner.py`, `evals/asset_extraction_benchmark.py`) keep their
+  stdout.
+
+### C21. DECIDED (Batch 4) — Typed model registry as a *derived* layer
+
+- **Decision:** `backend/model_registry/` exposes a typed, frozen `ModelEntry`
+  per model (provider, `api_name`, capabilities, input modalities, status,
+  enabled flag, default flag, reasoning effort, pricing ref) plus lookups and a
+  frontend-safe `frontend_model_catalog()` served at `GET /api/models`. Every
+  field is **derived** from the existing sources of truth (`llm.Llm`,
+  `OPENAI_MODEL_CONFIG`, `ANTHROPIC_MODEL_CONFIG`, the Gemini api-name rules,
+  `costs.pricing.MODEL_PRICING`) — not re-declared.
+- **Rationale:** spec model-registry requirement + constitution "no config as
+  code". A derived layer cannot silently drift; `tests/test_model_registry.py`
+  pins every entry's `api_name`/provider against the legacy resolver functions
+  (244 parametrised assertions).
+- **Explicitly not in the registry:** API keys, per-user/org config, billing,
+  usage accounting, a marketplace (all Phase 2). `to_public_dict()` omits
+  `api_name` and `pricing`; a test asserts the `/api/models` payload is
+  secret-free.
+- **Migration:** `agent/providers/factory.py` now dispatches on
+  `provider_of(model)`; `generation/model_selection.py` drops registry-disabled
+  models before selection. Other call sites migrate opportunistically.
+
+### C22. DECIDED (Batch 4) — FastAPI `lifespan` replaces `@app.on_event`
+
+- **Decision:** a single `@asynccontextmanager lifespan()` in `main.py` owns
+  startup (log config, operator-gate status, screenshot-preview probe) and
+  shutdown (`close_arq_pool`, `dispose_engine`, `close_redis`). The deprecated
+  `on_event("startup"/"shutdown")` hooks are gone.
+- **Rationale:** the `on_event` API is deprecated; lifespan is the supported
+  seam and makes ordered, awaited resource teardown explicit. No behaviour
+  change; the startup probe stays non-fatal.
+
+### C23. DECIDED (Batch 4) — Job lifecycle hardening: idempotent terminals + RUNNING re-acquire
+
+- **Decision:** `JobService._transition` treats *terminal → same terminal* as a
+  no-op (returns the row, emits nothing) so a re-delivered worker message or a
+  double `mark_*` call is idempotent, not an `InvalidJobTransition`. `RUNNING →
+  RUNNING` is now legal so a fresh worker can re-acquire a job whose previous
+  worker was killed before recording a terminal state (arq `max_tries` still
+  bounds attempts). Cancelled/succeeded/failed jobs still reject re-runs.
+- **Rationale:** spec queue failure modes C/E — a crashed worker must never
+  leave a job falsely `succeeded`, and the backlog must remain drainable.
+- **Final-audit addition (JL-4):** the RUNNING-re-acquire only helps when arq
+  re-delivers the job. A worker SIGKILLed with the job popped-and-unacked leaves
+  the row `running` forever. `JobService.reap_stuck_running` + a `reap_jobs` cron
+  (every 5 min, ceiling `JOB_REAP_AFTER_SECONDS`, default 3600, `0` disables)
+  fails such rows out-of-process. arq's in-process `job_timeout` still handles a
+  merely-hung job on a live worker.
+- **Final-audit addition (FR-F9 / JL-5):** `POST /api/jobs/{id}/cancel` is the
+  explicit-cancel trigger. QUEUED → `cancelled` (the worker's `mark_running`
+  guard keeps it from starting); RUNNING → `cancelled` + arq abort
+  (`allow_abort_jobs=True`; `execute_job` catches `CancelledError`, records it,
+  re-raises); terminal → 409. The route uses a channel-backed `JobService` so a
+  relay watching the job forwards the `cancelled` event and closes the socket.
+
+### C24. DECIDED (Batch 4) — Job retention: opt-in, cron-driven, conservative
+
+- **Decision:** `JOB_RETENTION_DAYS` (unset = disabled). When set, a daily arq
+  `cron` (`prune_jobs`, 03:17) deletes **terminal** job rows whose `finished_at`
+  is older than the window. Queued/running rows are never touched; there is no
+  new DB column and no tenant/owner filter.
+- **Rationale:** spec DR-6 ("opt-in, prunable; Phase 1 adds no new retention
+  obligation"). Kept deliberately minimal — not a GC subsystem.
+
+### C25. DECIDED (Batch 4) — The worker cannot render generated code
+
+- **Decision:** `worker._on_startup` calls
+  `preview_screenshot.disable_screenshot_preview()`, hard-disabling the
+  `screenshot_preview` agent tool in worker context. Rendering generated HTML in
+  headless Chromium *executes* untrusted markup/JS; the worker must remain
+  incapable of executing generated code (spec SEC / constitution). The
+  synchronous API process is unchanged — it still offers the tool.
+- **Rationale:** closes the one path by which the queued generation flow could
+  have executed model output. A real sandbox for generated code is Phase 6 and
+  explicitly out of scope here.
+
+### C26. DECIDED (final audit) — `/health` reports worker liveness; `redis` is a direct dependency
+
+- **Decision:** `/health` gained `checks.worker` (`ok` / `down`), read from arq's
+  own health-check key (`arq:queue:health-check`, refreshed every
+  `WORKER_HEALTH_INTERVAL_SECONDS`, default 30). Overall status is `degraded`
+  when `job_queue_enabled` is on and no worker is live. `redis[hiredis]` is now
+  an explicit `pyproject.toml` dependency (it was only transitive via `arq`,
+  though `redis_client.py` / `jobs.events` import it directly). CI + Dockerfile
+  Poetry pinned to **2.4.2** to read the committed `lock-version 2.1` lockfile.
+- **Rationale:** spec FR-F2 / SC-006 / OB-5 require worker health to be reported
+  via the health endpoint; a directly-imported package should be a declared
+  dependency.
+- **Also (final audit):** the four operator-gated eval-review iframes
+  (`AgentRunsPage`, `EvalComparePage`, `BestOfNEvalsPage` ×2) that render
+  generated HTML gained `sandbox="allow-scripts"` (no `allow-same-origin`),
+  consistent with FR-B1's intent for the primary preview.
 
 ---
 

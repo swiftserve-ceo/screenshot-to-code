@@ -19,6 +19,18 @@ def set_screenshot_backend(backend: ScreenshotBackend) -> None:
     _backend = backend
 
 
+def disable_screenshot_preview() -> None:
+    """Hard-disable the screenshot_preview tool for this process.
+
+    The background worker calls this at startup: rendering generated HTML in
+    headless Chromium *executes* untrusted markup/JS, and the worker MUST remain
+    incapable of executing generated code (Phase 1 spec SEC / constitution). The
+    synchronous API process is unaffected.
+    """
+    global _available
+    _available = False
+
+
 async def probe_screenshot_preview() -> bool:
     """Check (once, cached) whether the active backend can run here."""
     global _available

@@ -1,27 +1,95 @@
-version: '3.9'
+# Local development infrastructure + optional app-image demo.
+#
+#   Infra only (recommended for dev — run backend/frontend natively):
+#     docker compose up -d postgres redis
+#
+#   Full demo (builds the app images, no hot reload):
+#     docker compose --profile app up -d --build
+#
+# All credentials below are NON-SECRET local development defaults. Override them
+# in a root .env (git-ignored) or the shell for anything shared.
+
+name: lg-telecoms-app-builder
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-appbuilder}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-appbuilder}
+      POSTGRES_DB: ${POSTGRES_DB:-appbuilder}
+    ports:
+      # Bind to loopback only so the dev DB is not exposed on the network.
+      # Host port defaults to 5435 to avoid colliding with other local Postgres
+      # instances; the container always listens on 5432.
+      - "127.0.0.1:${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-appbuilder} -d ${POSTGRES_DB:-appbuilder}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
   backend:
-    build: 
+    profiles: ["app"]
+    build:
       context: ./backend
       dockerfile: Dockerfile
-    
     env_file:
       - .env
-    
-    # or 
-    # environment:
-      #- BACKEND_PORT=7001   # if you change the port, make sure to also change the VITE_WS_BACKEND_URL at frontend/.env.local
-      # - OPENAI_API_KEY=your_openai_api_key
-    
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://appbuilder:appbuilder@postgres:5432/appbuilder}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     ports:
       - "${BACKEND_PORT:-7001}:${BACKEND_PORT:-7001}"
-
     command: poetry run uvicorn main:app --host 0.0.0.0 --port ${BACKEND_PORT:-7001}
-  
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://appbuilder:appbuilder@postgres:5432/appbuilder}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command: poetry run arq worker.WorkerSettings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   frontend:
+    profiles: ["app"]
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "5173:5173"
+
+volumes:
+  pgdata:
+  redisdata:

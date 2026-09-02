@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "build-hosted": "tsc && vite build --mode prod",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "lint:ratchet": "node scripts/lint-ratchet.mjs",
     "preview": "vite preview",
     "test": "jest",
     "test:qa": "RUN_E2E=true TEST_ROOT_PATH=src/tests jest src/tests/qa.test.ts"

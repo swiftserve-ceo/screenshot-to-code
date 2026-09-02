@@ -47,26 +47,68 @@ stand the app up locally from LOCAL_DEVELOPMENT.md.
 **Goal:** introduce the skeleton every later phase depends on, without changing
 the end-user generation experience yet.
 
-- Choose and stand up **Postgres + Alembic**; introduce a data-access layer.
-- Introduce a **job queue** (Redis-backed) and a worker process; move a single
-  variant generation onto it behind a flag, keeping the WebSocket for events only.
-- Split the realtime channel: **events over WS/SSE per *AI session*; resources
-  over REST.**
-- Extract config into a typed settings module (Pydantic Settings), remove
-  implicit `bool(os.environ.get(...))` foot-guns (`IS_PROD`, `IS_DEBUG_ENABLED`).
-- Introduce **structured logging** + request/trace IDs; keep `print`-free going
-  forward.
-- Stand up **CI**: run backend pytest + pyright and frontend lint + jest + build
-  on every PR (none exists today).
-- Establish the **model registry** scaffold (capabilities table) without changing
-  selection behaviour yet.
-- Address the **P0 hardening items** from discovery that are cheap and
-  standalone: add `sandbox` to the preview iframe, scope CORS, gate `/evals/*`
-  and `/agent-runs/*` behind an admin check, remove the stale `frontend/Dockerfile`
-  `yarn` usage.
+- [x] Choose and stand up **Postgres + Alembic**; introduce a data-access layer.
+- [x] Introduce a **job queue** (Redis-backed) and a worker process; move a
+  single generation path onto it behind a flag, keeping the WebSocket for events.
+- [~] Split the realtime channel: **events over WS/SSE per *AI session*;
+  resources over REST.** — done for the queued `text→create` path (relay +
+  `/api/jobs/{id}` + `/api/models`); the other paths are still WS-scoped.
+- [x] Extract config into a typed settings module (`pydantic` v2 `BaseModel`),
+  remove implicit `bool(os.environ.get(...))` foot-guns; remaining `os.environ`
+  reads in app code moved behind `settings` (Batch 4).
+- [x] Introduce **structured logging** + request/trace IDs; runtime `print()`s
+  migrated (Batch 4 finished the provider / `fs_logging` / route / eval-core set).
+- [x] Stand up **CI**: backend `pytest` + `pyright` + `alembic check` +
+  service-container queue smoke test; frontend `test` + `lint:ratchet` + `build`.
+- [x] Establish the **model registry** — typed, derived `backend/model_registry/`
+  + `GET /api/models` (capability discovery, secret-free); `factory.py` and
+  `model_selection.py` consume it. Selection behaviour unchanged.
+- [x] Address the cheap standalone **P0 hardening** items: preview `sandbox`,
+  CORS allow-list, operator gate on `/evals*` `/agent-runs*` `/prompt-reports*`
+  `/eval-sets*`, repaired `frontend/Dockerfile`.
+- [x] **Python 3.12** target across `pyproject.toml` / `.python-version` /
+  pyright / Dockerfile / CI (local 3.13 still permitted).
+- [x] **FastAPI `lifespan`** replaces `@app.on_event`.
+- [x] **Job lifecycle** hardening — idempotent terminals, RUNNING re-acquire
+  after a worker crash, opt-in `JOB_RETENTION_DAYS` pruning via a daily cron.
+- [x] **Queue failure modes** A–F covered by tests.
 
 **Size:** L. **Exit criteria:** a generation can run through the queue/worker
 with events streamed to the client; CI green; Postgres in the dev stack.
+
+**Progress (remediation batches — see `docs/REMEDIATION_LOG.md`):**
+
+- **Batch 1 (2026-09-02)** — preview iframe sandboxing + postMessage bridge,
+  CORS allow-list, operator gate on `/evals*` `/agent-runs*` …, strict env-bool
+  parsing, typed `Settings` (`config.py`, on `pydantic` v2), structured logging +
+  request-id correlation, `frontend/Dockerfile` repaired.
+- **Batch 2 (2026-09-02)** — GitHub Actions CI (+ lint ratchet), PostgreSQL +
+  async SQLAlchemy 2.0 + Alembic (baseline `jobs` table only), Redis, **arq**
+  worker (D3 ratified), job model + `JobEventChannel`, `/health`. Generation not
+  yet queued.
+- **Batch 3 (2026-09-02)** — ✅ **first generation path queued**: `text → create`
+  runs API → job → Redis/arq → independent worker → `JobEventChannel` → WS relay
+  → frontend, behind `JOB_QUEUE_ENABLED` (default off). WebSocket disconnect ≠
+  cancel; reconnect replays the event backlog; `GET /api/jobs/{id}` for status.
+  Missing credentials → controlled failure (no crash, no retry).
+- **Batch 4 (2026-09-02)** — Python-3.12 consistency; typed **model registry**
+  (`model_registry/` + `GET /api/models`, derived + secret-free);
+  `os.environ`/config cleanup; **`lifespan`** migration; job-lifecycle hardening
+  (idempotent terminals, RUNNING re-acquire) + **opt-in retention** cron;
+  queue failure-mode tests (A–F); CI **`alembic check`** + a **live queue smoke
+  test** (real burst worker, no AI); the duplicate-error-toast fix
+  (`_Forwarder._error_sent` + `generateCode.test.ts`); security review (worker
+  can no longer render generated code — `screenshot_preview` disabled in worker
+  context) + logging review (runtime `print()`s migrated). 621 backend tests.
+
+**Still open in Phase 1 → Phase 2:** the remaining generation paths (image /
+multi-image / URL / video / **edit**) are still synchronous; the queued path uses
+**server** provider keys only (per-tenant secrets = Phase 2); no
+watchdog/reaper for a job whose worker vanished without arq re-queueing; CI has
+not yet run on a real GitHub Actions host; the model registry has no runtime
+admin toggle. **Phase 2 depends on:** the `jobs` table + `JobService` state
+machine, the `JobEventChannel` relay contract, the model registry
+(`to_public_dict` shape), typed `settings`, and CI being green.
 
 ---
 

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import routes.design_systems as ds_mod
 from routes.design_systems import (
     CreateDesignSystemRequest,
     UpdateDesignSystemRequest,
@@ -18,7 +19,11 @@ from routes.design_systems import (
 async def test_design_system_crud_persists_to_backend_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SCREENSHOT_TO_CODE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ds_mod,
+        "settings",
+        ds_mod.settings.model_copy(update={"screenshot_to_code_data_dir": str(tmp_path)}),
+    )
 
     assert await list_design_systems() == []
 

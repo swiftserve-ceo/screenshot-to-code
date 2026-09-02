@@ -12,7 +12,8 @@ from agent.providers.openai import OpenAIProviderSession, serialize_openai_tools
 from agent.tools import canonical_tool_definitions
 from config import REPLICATE_API_KEY
 from fs_logging.agent_runs import AgentRunRecorder
-from llm import ANTHROPIC_MODELS, GEMINI_MODELS, OPENAI_MODELS, Llm
+from llm import Llm
+from model_registry import Provider, provider_of
 from preview_screenshot import is_screenshot_preview_available
 
 
@@ -38,7 +39,9 @@ def create_provider_session(
         screenshot_enabled=is_screenshot_preview_available(),
     )
 
-    if model in OPENAI_MODELS:
+    provider = provider_of(model)
+
+    if provider is Provider.OPENAI:
         if not openai_api_key:
             raise Exception("OpenAI API key is missing.")
 
@@ -51,7 +54,7 @@ def create_provider_session(
             recorder=recorder,
         )
 
-    if model in ANTHROPIC_MODELS:
+    if provider is Provider.ANTHROPIC:
         if not anthropic_api_key:
             raise Exception("Anthropic API key is missing.")
 
@@ -64,7 +67,7 @@ def create_provider_session(
             recorder=recorder,
         )
 
-    if model in GEMINI_MODELS:
+    if provider is Provider.GEMINI:
         if not gemini_api_key:
             raise Exception("Gemini API key is missing.")
 

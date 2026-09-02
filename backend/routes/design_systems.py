@@ -1,5 +1,4 @@
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -7,6 +6,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
+
+from config import settings
 
 router = APIRouter()
 
@@ -30,7 +31,7 @@ class UpdateDesignSystemRequest(BaseModel):
 
 
 def get_design_systems_file_path() -> Path:
-    data_dir = os.environ.get("SCREENSHOT_TO_CODE_DATA_DIR")
+    data_dir = settings.screenshot_to_code_data_dir
     base_path = Path(data_dir).expanduser() if data_dir else Path.home() / ".screenshot-to-code"
     return base_path / "design-systems.json"
 

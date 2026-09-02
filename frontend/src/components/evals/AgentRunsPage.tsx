@@ -527,6 +527,9 @@ function AgentRunsPage() {
                   <iframe
                     title="Captured final output"
                     src={runOutputUrl(selectedRunId)}
+                    // Renders untrusted generated HTML: scripts only, never
+                    // "allow-same-origin".
+                    sandbox="allow-scripts"
                     className="h-[75vh] w-full rounded-xl border border-zinc-800 bg-white"
                   />
                 )}

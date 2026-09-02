@@ -16,6 +16,9 @@ from datetime import datetime
 from typing import Any, Optional, cast
 
 import evals.config as evals_config
+from logging_config import get_logger
+
+logger = get_logger("evals.sets")
 
 # Blocks path traversal while allowing human-friendly names like
 # "jun-21-evals" or "Landing Pages v2".
@@ -154,10 +157,10 @@ def _save_manifest(set_name: str, manifest: dict[str, Any]) -> None:
     try:
         with open(_manifest_path(set_name), "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
-    except OSError as exc:
+    except OSError:
         # The manifest is a cache/metadata sidecar; failing to persist it
         # must not fail set operations.
-        print(f"[EVAL SETS] Failed to write manifest for {set_name}: {exc}")
+        logger.warning("failed to write eval-set manifest", extra={"set": set_name}, exc_info=True)
 
 
 def _sha256_of_file(path: str) -> str:

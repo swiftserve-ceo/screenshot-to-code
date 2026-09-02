@@ -3,7 +3,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from abc import ABC, abstractmethod
-import traceback
 from typing import Callable, Awaitable
 from fastapi import APIRouter, WebSocket
 import openai
@@ -36,23 +35,21 @@ from typing import (
 )
 from openai.types.chat import ChatCompletionMessageParam
 
-from utils import print_prompt_preview
+from utils import log_prompt_preview
+from logging_config import get_logger, get_request_id, new_request_id, request_context
+from generation.variants import AgenticGenerationStage, MessageType
+from generation.model_selection import (
+    NoProviderCredentialsError,
+    select_variant_models,
+)
+from routes.generation_relay import (
+    is_queued_text_create,
+    resume_job,
+    start_queued_generation,
+)
 
-# WebSocket message types
-MessageType = Literal[
-    "chunk",
-    "status",
-    "setCode",
-    "error",
-    "variantComplete",
-    "variantError",
-    "variantCount",
-    "variantModels",
-    "thinking",
-    "assistant",
-    "toolStart",
-    "toolResult",
-]
+logger = get_logger("generate_code")
+
 from prompts.pipeline import build_prompt_messages
 from prompts.request_parsing import parse_prompt_content, parse_prompt_history
 from prompts.prompt_types import PromptHistoryMessage, Stack, UserTurnInput
@@ -167,7 +164,7 @@ class WebSocketCommunicator:
     async def accept(self) -> None:
         """Accept the WebSocket connection"""
         await self.websocket.accept()
-        print("Incoming websocket connection...")
+        logger.info("incoming websocket connection")
 
     async def send_message(
         self,
@@ -181,15 +178,15 @@ class WebSocketCommunicator:
         if self.is_closed:
             return
 
-        # Print for debugging on the backend
+        # Structured log of notable outbound events (not every chunk).
         if type == "error":
-            print(f"Error (variant {variantIndex + 1}): {value}")
+            logger.warning("variant error event", extra={"variant": variantIndex + 1, "value": value})
         elif type == "status":
-            print(f"Status (variant {variantIndex + 1}): {value}")
+            logger.debug("variant status event", extra={"variant": variantIndex + 1, "value": value})
         elif type == "variantComplete":
-            print(f"Variant {variantIndex + 1} complete")
+            logger.info("variant complete", extra={"variant": variantIndex + 1})
         elif type == "variantError":
-            print(f"Variant {variantIndex + 1} error: {value}")
+            logger.warning("variant failed", extra={"variant": variantIndex + 1, "value": value})
 
         try:
             payload: Dict[str, Any] = {"type": type, "variantIndex": variantIndex}
@@ -206,12 +203,12 @@ class WebSocketCommunicator:
             RuntimeError,
             WebSocketDisconnect,
         ):
-            print(f"WebSocket closed by client, skipping message: {type}")
+            logger.info("websocket closed by client, skipping message", extra={"message_type": type})
             self.is_closed = True
 
     async def throw_error(self, message: str) -> None:
         """Send an error message and close the connection"""
-        print(message)
+        logger.warning("generation error returned to client", extra={"detail": message})
         if not self.is_closed:
             try:
                 await self.websocket.send_json({"type": "error", "value": message})
@@ -222,7 +219,7 @@ class WebSocketCommunicator:
                 RuntimeError,
                 WebSocketDisconnect,
             ):
-                print("WebSocket already closed by client")
+                logger.info("websocket already closed by client")
             self.is_closed = True
 
     async def receive_params(self) -> Dict[str, Any]:
@@ -232,7 +229,7 @@ class WebSocketCommunicator:
         except WebSocketDisconnect:
             self.is_closed = True
             raise
-        print("Received params")
+        logger.debug("received generation params")
         return params
 
     async def close(self) -> None:
@@ -322,7 +319,7 @@ class ParameterExtractionStage:
                 params, "openAiBaseURL", OPENAI_BASE_URL
             )
         if not openai_base_url:
-            print("Using official OpenAI URL")
+            logger.debug("using official OpenAI URL")
 
         # Feature preferences default to enabled for older clients.
         should_generate_images = bool(params.get("isImageGenerationEnabled", True))
@@ -398,11 +395,11 @@ class ParameterExtractionStage:
         """Get value from client settings or environment variable"""
         value = params.get(key)
         if value:
-            print(f"Using {key} from client-side settings dialog")
+            logger.debug("using credential from client settings dialog", extra={"key": key})
             return value
 
         if env_var:
-            print(f"Using {key} from environment variable")
+            logger.debug("using credential from environment", extra={"key": key})
             return env_var
 
         return None
@@ -434,10 +431,10 @@ class ModelSelectionStage:
                 gemini_api_key,
             )
 
-            # Print the variant models (one per line)
-            print("Variant models:")
-            for index, model in enumerate(variant_models):
-                print(f"Variant {index + 1}: {model.value}")
+            logger.info(
+                "selected variant models",
+                extra={"models": [model.value for model in variant_models]},
+            )
 
             return variant_models
         except Exception:
@@ -457,46 +454,15 @@ class ModelSelectionStage:
         anthropic_api_key: str | None,
         gemini_api_key: str | None,
     ) -> List[Llm]:
-        """Simple model cycling that scales with num_variants"""
-
-        # Video mode requires Gemini - 2 variants for comparison
-        if input_mode == "video":
-            if not gemini_api_key:
-                raise Exception(
-                    "Video mode requires a Gemini API key. "
-                    "Please add GEMINI_API_KEY to backend/.env or in the settings dialog"
-                )
-            return list(VIDEO_VARIANT_MODELS)
-
-        # Define models based on available API keys
-        if gemini_api_key and anthropic_api_key and openai_api_key:
-            if input_mode == "text" and generation_type == "create":
-                models = list(ALL_KEYS_MODELS_TEXT_CREATE)
-            elif generation_type == "update":
-                models = list(ALL_KEYS_MODELS_UPDATE)
-            else:
-                models = list(ALL_KEYS_MODELS_DEFAULT)
-        elif gemini_api_key and anthropic_api_key:
-            models = list(GEMINI_ANTHROPIC_MODELS)
-        elif gemini_api_key and openai_api_key:
-            models = list(GEMINI_OPENAI_MODELS)
-        elif openai_api_key and anthropic_api_key:
-            models = list(OPENAI_ANTHROPIC_MODELS)
-        elif gemini_api_key:
-            models = list(GEMINI_ONLY_MODELS)
-        elif anthropic_api_key:
-            models = list(ANTHROPIC_ONLY_MODELS)
-        elif openai_api_key:
-            models = list(OPENAI_ONLY_MODELS)
-        else:
-            raise Exception("No OpenAI or Anthropic key")
-
-        # Cycle through models: [A, B] with num=5 becomes [A, B, A, B, A]
-        selected_models: List[Llm] = []
-        for i in range(num_variants):
-            selected_models.append(models[i % len(models)])
-
-        return selected_models
+        """Delegates to the shared pure selector (`generation.model_selection`)."""
+        return select_variant_models(
+            generation_type=generation_type,
+            input_mode=input_mode,
+            num_variants=num_variants,
+            openai_api_key=openai_api_key,
+            anthropic_api_key=anthropic_api_key,
+            gemini_api_key=gemini_api_key,
+        )
 
 
 class PromptCreationStage:
@@ -521,12 +487,14 @@ class PromptCreationStage:
                 image_generation_enabled=extracted_params.should_generate_images,
                 design_system=extracted_params.design_system,
             )
-            print_prompt_preview(prompt_messages)
+            log_prompt_preview(logger, prompt_messages)
 
             return prompt_messages
         except Exception:
+            logger.exception("failed to assemble prompt messages")
             await self.throw_error(
-                "Error assembling prompt. Contact support at support@getwhimsyworks.com"
+                "Error assembling the prompt for this request. Check the backend logs "
+                "for details."
             )
             raise
 
@@ -545,172 +513,6 @@ class PostProcessingStage:
         """Process completions and perform cleanup."""
         return None
 
-
-class AgenticGenerationStage:
-    """Handles agent tool-calling generation for each variant."""
-
-    def __init__(
-        self,
-        send_message: Callable[[MessageType, str | None, int, Dict[str, Any] | None, str | None], Coroutine[Any, Any, None]],
-        openai_api_key: str | None,
-        openai_base_url: str | None,
-        anthropic_api_key: str | None,
-        gemini_api_key: str | None,
-        replicate_api_key: str | None,
-        should_generate_images: bool,
-        file_state: Dict[str, str] | None,
-        asset_base_url: str,
-        option_codes: List[str] | None,
-        should_extract_assets: bool = True,
-        generation_id: str | None = None,
-        stack: str | None = None,
-        input_mode: str | None = None,
-        generation_type: str | None = None,
-    ):
-        self.send_message = send_message
-        self.openai_api_key = openai_api_key
-        self.openai_base_url = openai_base_url
-        self.anthropic_api_key = anthropic_api_key
-        self.gemini_api_key = gemini_api_key
-        self.replicate_api_key = replicate_api_key
-        self.should_generate_images = should_generate_images
-        self.should_extract_assets = should_extract_assets
-        self.file_state = file_state
-        self.asset_base_url = asset_base_url
-        self.option_codes = option_codes or []
-        self.generation_id = (
-            generation_id
-            or f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-        )
-        self.stack = stack
-        self.input_mode = input_mode
-        self.generation_type = generation_type
-
-    async def process_variants(
-        self,
-        variant_models: List[Llm],
-        prompt_messages: List[ChatCompletionMessageParam],
-    ) -> Dict[int, str]:
-        tasks: List[asyncio.Task[str]] = []
-        for index, model in enumerate(variant_models):
-            tasks.append(
-                asyncio.create_task(
-                    self._run_variant(index, model, prompt_messages)
-                )
-            )
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        variant_completions: Dict[int, str] = {}
-        for index, result in enumerate(results):
-            if isinstance(result, BaseException):
-                print(f"Variant {index + 1} failed: {result}")
-                continue
-            if result:
-                variant_completions[index] = result
-
-        return variant_completions
-
-    async def _run_variant(
-        self,
-        index: int,
-        model: Llm,
-        prompt_messages: List[ChatCompletionMessageParam],
-    ) -> str:
-        try:
-            async def send_runner_message(
-                type: str,
-                value: str | None,
-                variant_index: int,
-                data: Dict[str, Any] | None,
-                event_id: str | None,
-            ) -> None:
-                await self.send_message(
-                    cast(MessageType, type),
-                    value,
-                    variant_index,
-                    data,
-                    event_id,
-                )
-
-            recorder = AgentRunRecorder(
-                generation_id=self.generation_id,
-                variant_index=index,
-                entry_point="websocket",
-                stack=self.stack,
-                input_mode=self.input_mode,
-                generation_type=self.generation_type,
-            )
-            runner = Agent(
-                send_message=send_runner_message,
-                variant_index=index,
-                openai_api_key=self.openai_api_key,
-                openai_base_url=self.openai_base_url,
-                anthropic_api_key=self.anthropic_api_key,
-                gemini_api_key=self.gemini_api_key,
-                replicate_api_key=self.replicate_api_key,
-                should_generate_images=self.should_generate_images,
-                should_extract_assets=self.should_extract_assets,
-                asset_base_url=self.asset_base_url,
-                initial_file_state=self.file_state,
-                option_codes=self.option_codes,
-                recorder=recorder,
-            )
-            completion = await runner.run(model, prompt_messages)
-            if completion:
-                await self.send_message("setCode", completion, index, None, None)
-            await self.send_message(
-                "variantComplete",
-                "Variant generation complete",
-                index,
-                None,
-                None,
-            )
-            return completion
-        except openai.AuthenticationError as e:
-            print(f"[VARIANT {index + 1}] OpenAI Authentication failed", e)
-            error_message = (
-                "Incorrect OpenAI key. Please make sure your OpenAI API key is correct, "
-                "or create a new OpenAI API key on your OpenAI dashboard."
-                + (
-                    " Alternatively, you can purchase code generation credits directly on this website."
-                    if IS_PROD
-                    else ""
-                )
-            )
-            await self.send_message("variantError", error_message, index, None, None)
-            return ""
-        except openai.NotFoundError as e:
-            print(f"[VARIANT {index + 1}] OpenAI Model not found", e)
-            error_message = (
-                e.message
-                + ". Please make sure you have followed the instructions correctly to obtain "
-                "an OpenAI key with GPT vision access: "
-                "https://github.com/abi/screenshot-to-code/blob/main/Troubleshooting.md"
-                + (
-                    " Alternatively, you can purchase code generation credits directly on this website."
-                    if IS_PROD
-                    else ""
-                )
-            )
-            await self.send_message("variantError", error_message, index, None, None)
-            return ""
-        except openai.RateLimitError as e:
-            print(f"[VARIANT {index + 1}] OpenAI Rate limit exceeded", e)
-            error_message = (
-                "OpenAI error - 'You exceeded your current quota, please check your plan and billing details.'"
-                + (
-                    " Alternatively, you can purchase code generation credits directly on this website."
-                    if IS_PROD
-                    else ""
-                )
-            )
-            await self.send_message("variantError", error_message, index, None, None)
-            return ""
-        except Exception as e:
-            print(f"Error in variant {index + 1}: {e}")
-            traceback.print_exception(type(e), e, e.__traceback__)
-            await self.send_message("variantError", str(e), index, None, None)
-            return ""
 
 
 # Pipeline Middleware Implementations
@@ -733,17 +535,46 @@ class WebSocketSetupMiddleware(Middleware):
             await context.ws_comm.close()
 
 
-class ParameterExtractionMiddleware(Middleware):
-    """Handles parameter extraction and validation"""
+class ReceiveParamsMiddleware(Middleware):
+    """Receives the client's params blob (nothing else)."""
 
     async def process(
         self, context: PipelineContext, next_func: Callable[[], Awaitable[None]]
     ) -> None:
-        # Receive parameters
         assert context.ws_comm is not None
         context.params = await context.ws_comm.receive_params()
+        await next_func()
 
-        # Extract and validate
+
+class QueuedGenerationMiddleware(Middleware):
+    """Batch 3: routes the migrated text→create path (and reconnects) onto the
+    Redis/arq worker. Everything else falls through to the synchronous pipeline."""
+
+    async def process(
+        self, context: PipelineContext, next_func: Callable[[], Awaitable[None]]
+    ) -> None:
+        params = context.params
+        job_id = params.get("jobId")
+        if job_id:
+            await resume_job(context.websocket, str(job_id))
+            return  # short-circuit: relay owns the socket now
+        if is_queued_text_create(params):
+            await start_queued_generation(
+                context.websocket,
+                params,
+                infer_local_asset_base_url(context.websocket),
+                get_request_id(),
+            )
+            return  # short-circuit
+        await next_func()
+
+
+class ParameterExtractionMiddleware(Middleware):
+    """Handles parameter extraction and validation (synchronous path)."""
+
+    async def process(
+        self, context: PipelineContext, next_func: Callable[[], Awaitable[None]]
+    ) -> None:
         param_extractor = ParameterExtractionStage(
             context.throw_error,
             infer_local_asset_base_url(context.websocket),
@@ -752,9 +583,13 @@ class ParameterExtractionMiddleware(Middleware):
             context.params
         )
 
-        # Log what we're generating
-        print(
-            f"Generating {context.extracted_params.stack} code in {context.extracted_params.input_mode} mode"
+        logger.info(
+            "generating code",
+            extra={
+                "stack": context.extracted_params.stack,
+                "input_mode": context.extracted_params.input_mode,
+                "generation_type": context.extracted_params.generation_type,
+            },
         )
 
         await next_func()
@@ -863,7 +698,7 @@ class CodeGenerationMiddleware(Middleware):
                     context.completions.append("")
 
         except Exception as e:
-            print(f"[GENERATE_CODE] Unexpected error: {e}")
+            logger.exception("unexpected error in code generation pipeline")
             await context.throw_error(f"An unexpected error occurred: {str(e)}")
             return  # Don't continue the pipeline
 
@@ -887,15 +722,21 @@ class PostProcessingMiddleware(Middleware):
 @router.websocket("/generate-code")
 async def stream_code(websocket: WebSocket):
     """Handle WebSocket code generation requests using a pipeline pattern"""
-    pipeline = Pipeline()
+    # HTTP middleware does not run for WebSockets, so bind a correlation id here
+    # so every log line for this generation session shares it.
+    inbound_id = websocket.headers.get("x-request-id")
+    with request_context(inbound_id or new_request_id()):
+        pipeline = Pipeline()
 
-    # Configure the pipeline
-    pipeline.use(WebSocketSetupMiddleware())
-    pipeline.use(ParameterExtractionMiddleware())
-    pipeline.use(StatusBroadcastMiddleware())
-    pipeline.use(PromptCreationMiddleware())
-    pipeline.use(CodeGenerationMiddleware())
-    pipeline.use(PostProcessingMiddleware())
+        # Configure the pipeline
+        pipeline.use(WebSocketSetupMiddleware())
+        pipeline.use(ReceiveParamsMiddleware())
+        pipeline.use(QueuedGenerationMiddleware())  # Batch 3: text→create -> worker
+        pipeline.use(ParameterExtractionMiddleware())
+        pipeline.use(StatusBroadcastMiddleware())
+        pipeline.use(PromptCreationMiddleware())
+        pipeline.use(CodeGenerationMiddleware())
+        pipeline.use(PostProcessingMiddleware())
 
-    # Execute the pipeline
-    await pipeline.execute(websocket)
+        # Execute the pipeline
+        await pipeline.execute(websocket)

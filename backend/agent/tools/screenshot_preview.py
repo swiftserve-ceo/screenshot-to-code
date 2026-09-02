@@ -5,6 +5,9 @@ from preview_screenshot import capture_preview_screenshot
 
 from agent.state import AgentFileState
 from agent.tools.types import ToolExecutionResult, ToolMultimodalPart
+from logging_config import get_logger
+
+logger = get_logger("agent.tools.screenshot_preview")
 
 
 PREVIEW_VIEWPORTS = ("desktop", "mobile")
@@ -62,7 +65,7 @@ async def run_screenshot_preview(
                 )
             )
     except Exception as exc:
-        print(f"Preview screenshot failed: {exc}")
+        logger.warning("preview screenshot failed", extra={"error": str(exc)})
         return ToolExecutionResult(
             ok=False,
             result={"error": f"Screenshot failed: {exc}"},

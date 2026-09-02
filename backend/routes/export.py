@@ -17,6 +17,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from babel_cdn import normalize_babel_cdn
+from logging_config import get_logger
+
+logger = get_logger("routes.export")
 
 router = APIRouter()
 
@@ -277,8 +280,8 @@ async def fetch_remote_asset(
 
     for _ in range(MAX_REDIRECTS + 1):
         if not await is_public_http_url(current_url):
-            print(
-                "Export asset skipped: "
+            logger.warning(
+                "export asset skipped: "
                 f"reason=non_public_url url={display_asset_url(current_url)}"
             )
             return None
@@ -289,30 +292,30 @@ async def fetch_remote_asset(
 
         location = response.headers.get("location")
         if not location:
-            print(
-                "Export asset skipped: "
+            logger.warning(
+                "export asset skipped: "
                 f"reason=redirect_without_location url={display_asset_url(current_url)}"
             )
             return None
         current_url = urljoin(current_url, location)
 
     if response is None or response.is_redirect:
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason=too_many_redirects url={display_asset_url(fetch_url)}"
         )
         return None
     if not response.is_success:
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason=http_status_{response.status_code} url={display_asset_url(current_url)}"
         )
         return None
 
     content = response.content
     if len(content) > MAX_ASSET_BYTES:
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason=too_large bytes={len(content)} url={display_asset_url(current_url)}"
         )
         return None
@@ -323,8 +326,8 @@ async def fetch_remote_asset(
         and not content_type.lower().startswith("image/")
         and extension_hint == "bin"
     ):
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason=non_image_content_type contentType={content_type} "
             f"url={display_asset_url(current_url)}"
         )
@@ -341,8 +344,8 @@ async def fetch_asset(
 ) -> ExportedAsset | None:
     fetch_url = resolve_fetch_url(candidate.url, base_url)
     if not fetch_url:
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason=unresolved_relative_url url={display_asset_url(candidate.url)}"
         )
         return None
@@ -355,8 +358,8 @@ async def fetch_asset(
                 client, fetch_url, candidate.extension_hint
             )
     except Exception as exc:
-        print(
-            "Export asset skipped: "
+        logger.warning(
+            "export asset skipped: "
             f"reason={type(exc).__name__} url={display_asset_url(fetch_url)}"
         )
         return None
@@ -477,8 +480,8 @@ async def export_code(request: ExportRequest) -> Response:
 
     index_html = rewrite_raw_asset_urls(str(soup), asset_path_by_url)
     zip_content = create_project_zip(index_html, assets)
-    print(
-        "Export complete: "
+    logger.info(
+        "export complete: "
         f"candidates={len(candidates)} assets={len(assets)} "
         f"skipped={len(candidates) - len(assets)} responseBytes={len(zip_content)}"
     )

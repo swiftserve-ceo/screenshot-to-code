@@ -70,7 +70,10 @@ function VariantThumbnail({ code, isSelected }: VariantThumbnailProps) {
           height: `${IFRAME_HEIGHT}px`,
           transform: `scale(${scale})`,
         }}
-        sandbox="allow-scripts allow-same-origin"
+        // Non-interactive thumbnail: scripts only (so generated pages render),
+        // never "allow-same-origin" — that combination lets sandboxed code
+        // reach the host origin.
+        sandbox="allow-scripts"
       />
     </div>
   );

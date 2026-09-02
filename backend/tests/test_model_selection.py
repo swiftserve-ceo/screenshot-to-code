@@ -203,6 +203,56 @@ class TestModelSelectionOpenAIOnly:
         assert models == expected
 
 
+class TestModelSelectionGeminiCombos:
+    """Pin the remaining key pairings so registry/model_choice_sets drift fails
+    CI (spec FR-G3 / FR-G5 / SC-012)."""
+
+    def setup_method(self):
+        self.model_selector = ModelSelectionStage(AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_gemini_anthropic_only(self):
+        from routes.model_choice_sets import GEMINI_ANTHROPIC_MODELS
+
+        models = await self.model_selector.select_models(
+            generation_type="create",
+            input_mode="text",
+            openai_api_key=None,
+            anthropic_api_key="key",
+            gemini_api_key="key",
+        )
+        pool = list(GEMINI_ANTHROPIC_MODELS)
+        assert models == [pool[i % len(pool)] for i in range(4)]
+
+    @pytest.mark.asyncio
+    async def test_gemini_openai_only(self):
+        from routes.model_choice_sets import GEMINI_OPENAI_MODELS
+
+        models = await self.model_selector.select_models(
+            generation_type="create",
+            input_mode="text",
+            openai_api_key="key",
+            anthropic_api_key=None,
+            gemini_api_key="key",
+        )
+        pool = list(GEMINI_OPENAI_MODELS)
+        assert models == [pool[i % len(pool)] for i in range(4)]
+
+    @pytest.mark.asyncio
+    async def test_gemini_only(self):
+        from routes.model_choice_sets import GEMINI_ONLY_MODELS
+
+        models = await self.model_selector.select_models(
+            generation_type="create",
+            input_mode="text",
+            openai_api_key=None,
+            anthropic_api_key=None,
+            gemini_api_key="key",
+        )
+        pool = list(GEMINI_ONLY_MODELS)
+        assert models == [pool[i % len(pool)] for i in range(4)]
+
+
 class TestModelSelectionNoKeys:
     """Test model selection when no API keys are present."""
 

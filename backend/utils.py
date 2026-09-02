@@ -1,12 +1,41 @@
 import copy
 import json
+import logging
+import sys
 import textwrap
 from typing import List
 from openai.types.chat import ChatCompletionMessageParam
 
 
+def _safe_print(text: str) -> None:
+    """print() that never raises on a non-UTF-8 stdout.
+
+    The prompt-visualisation helpers below draw box-drawing characters. On a
+    cp1252 console (Windows default) or a byte-encoded pipe, ``print`` of those
+    characters raises ``UnicodeEncodeError``; historically that crashed the
+    generation pipeline (BASELINE_FUNCTIONAL_AUDIT KF-1). Degrade instead.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(text.encode(encoding, errors="backslashreplace").decode(encoding))
+
+
 def pprint_prompt(prompt_messages: List[ChatCompletionMessageParam]):
-    print(json.dumps(truncate_data_strings(prompt_messages), indent=4))
+    _safe_print(json.dumps(truncate_data_strings(prompt_messages), indent=4))
+
+
+def log_prompt_preview(
+    logger: logging.Logger, prompt_messages: List[ChatCompletionMessageParam]
+) -> None:
+    """Emit the prompt preview through structured logging (DEBUG).
+
+    Used on the generation request path so the preview carries the request id and
+    respects the configured log level, and can never crash on encoding.
+    """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("prompt preview\n%s", format_prompt_preview(prompt_messages))
 
 
 def format_prompt_summary(prompt_messages: List[ChatCompletionMessageParam], truncate: bool = True) -> str:
@@ -50,14 +79,15 @@ def print_prompt_summary(prompt_messages: List[ChatCompletionMessageParam], trun
     title = "PROMPT SUMMARY"
     max_length = max(max_length, len(title) + 4)
     
-    print("┌─" + "─" * max_length + "─┐")
+    out: list[str] = []
+    out.append("┌─" + "─" * max_length + "─┐")
     title_padding = (max_length - len(title)) // 2
-    print(f"│ {' ' * title_padding}{title}{' ' * (max_length - len(title) - title_padding)} │")
-    print("├─" + "─" * max_length + "─┤")
-    
+    out.append(f"│ {' ' * title_padding}{title}{' ' * (max_length - len(title) - title_padding)} │")
+    out.append("├─" + "─" * max_length + "─┤")
+
     for line in lines:
         if len(line) <= max_length:
-            print(f"│ {line:<{max_length}} │")
+            out.append(f"│ {line:<{max_length}} │")
         else:
             # Wrap long lines
             words = line.split()
@@ -67,13 +97,13 @@ def print_prompt_summary(prompt_messages: List[ChatCompletionMessageParam], trun
                     current_line += (" " + word) if current_line else word
                 else:
                     if current_line:
-                        print(f"│ {current_line:<{max_length}} │")
+                        out.append(f"│ {current_line:<{max_length}} │")
                     current_line = word
             if current_line:
-                print(f"│ {current_line:<{max_length}} │")
-    
-    print("└─" + "─" * max_length + "─┘")
-    print()
+                out.append(f"│ {current_line:<{max_length}} │")
+
+    out.append("└─" + "─" * max_length + "─┘")
+    _safe_print("\n".join(out) + "\n")
 
 
 def _collapse_preview_text(text: str, max_chars: int = 280) -> str:
@@ -148,25 +178,26 @@ def print_prompt_preview(prompt_messages: List[ChatCompletionMessageParam]) -> N
     title = "PROMPT PREVIEW"
     max_length = max(max_length, len(title) + 4)
 
-    print("┌─" + "─" * max_length + "─┐")
+    out: list[str] = []
+    out.append("┌─" + "─" * max_length + "─┐")
     title_padding = (max_length - len(title)) // 2
-    print(
+    out.append(
         f"│ {' ' * title_padding}{title}{' ' * (max_length - len(title) - title_padding)} │"
     )
-    print("├─" + "─" * max_length + "─┤")
+    out.append("├─" + "─" * max_length + "─┤")
 
     for line in lines:
         if len(line) <= max_length:
-            print(f"│ {line:<{max_length}} │")
+            out.append(f"│ {line:<{max_length}} │")
         else:
             wrapped = textwrap.wrap(
                 line, width=max_length, break_long_words=False, break_on_hyphens=False
             )
             for wrapped_line in wrapped:
-                print(f"│ {wrapped_line:<{max_length}} │")
+                out.append(f"│ {wrapped_line:<{max_length}} │")
 
-    print("└─" + "─" * max_length + "─┘")
-    print()
+    out.append("└─" + "─" * max_length + "─┘")
+    _safe_print("\n".join(out) + "\n")
 
 
 def truncate_data_strings(data: List[ChatCompletionMessageParam]):  # type: ignore

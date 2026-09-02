@@ -7,6 +7,9 @@ from image_generation.replicate import (
     ReplicateImageModel,
     call_replicate,
 )
+from logging_config import get_logger
+
+logger = get_logger("image_generation")
 
 
 REPLICATE_BATCH_SIZE = 20
@@ -28,12 +31,12 @@ async def process_tasks(
         results.extend(await asyncio.gather(*tasks, return_exceptions=True))
     end_time = time.time()
     generation_time = end_time - start_time
-    print(f"Image generation time: {generation_time:.2f} seconds")
+    logger.info("image generation batch complete", extra={"seconds": round(generation_time, 2), "count": len(prompts)})
 
     processed_results: List[Union[str, None]] = []
     for result in results:
         if isinstance(result, BaseException):
-            print(f"An exception occurred: {result}")
+            logger.warning("image generation task failed", extra={"error": type(result).__name__})
             processed_results.append(None)
         else:
             processed_results.append(result)

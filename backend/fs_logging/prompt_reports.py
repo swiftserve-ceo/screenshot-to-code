@@ -22,8 +22,11 @@ from typing import Any
 from costs.pricing import MODEL_PRICING
 from costs.token_usage import TokenUsage
 from agent.state import ensure_str
-from config import PROMPT_REPORTS_ENABLED
+from config import PROMPT_REPORTS_ENABLED, settings
 from llm import Llm
+from logging_config import get_logger
+
+logger = get_logger("fs_logging.prompt_reports")
 
 PROMPT_REPORT_FILENAME_PREFIX = "prompt_report_"
 PROMPT_REPORT_FILENAME_PATTERN = re.compile(
@@ -33,7 +36,9 @@ PROMPT_REPORT_FILENAME_PATTERN = re.compile(
 
 
 def get_run_logs_directory() -> str:
-    logs_path = os.environ.get("LOGS_PATH", os.getcwd())
+    # `LOGS_PATH` is a runtime *path* override honoured live (ops + tests);
+    # otherwise the typed setting (populated from LOGS_PATH at startup) or cwd.
+    logs_path = os.environ.get("LOGS_PATH") or settings.logs_path or os.getcwd()
     return os.path.join(logs_path, "run_logs")
 
 
@@ -115,7 +120,7 @@ class PromptReportLogger:
             get_prompt_reports_directory(), filename
         )
         if self._write_current_report():
-            print(f"[PROMPT REPORT] Wrote {self._current_filepath}")
+            logger.debug("wrote prompt report", extra={"path": self._current_filepath})
             return self._current_filepath
         return None
 
@@ -143,6 +148,6 @@ class PromptReportLogger:
             with open(self._current_filepath, "w", encoding="utf-8") as f:
                 json.dump(self._current_report, f, indent=2, ensure_ascii=False)
             return True
-        except Exception as e:
-            print(f"[PROMPT REPORT] Failed to write report: {e}")
+        except Exception:
+            logger.warning("failed to write prompt report", exc_info=True)
             return False

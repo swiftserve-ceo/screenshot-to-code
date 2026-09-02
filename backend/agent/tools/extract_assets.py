@@ -7,6 +7,9 @@ from uploaded_assets.store import persist_data_url_as_asset
 from agent.state import ensure_str
 from agent.tools.summaries import summarize_text
 from agent.tools.types import ToolExecutionResult, ToolMultimodalPart
+from logging_config import get_logger
+
+logger = get_logger("agent.tools.extract_assets")
 
 
 IMAGE_EXTENSION_BY_MIME_TYPE = {
@@ -96,7 +99,7 @@ async def run_extract_assets(
         # abort the whole variant. Like the other external image tools, report it
         # as a tool error so the agent can continue or fall back (e.g. redraw with
         # generate_images) instead of propagating out of the tool runtime.
-        print(f"Asset extraction failed: {exc}")
+        logger.warning("asset extraction failed", extra={"error": str(exc)})
         return ToolExecutionResult(
             ok=False,
             result={"error": f"Asset extraction failed: {exc}"},

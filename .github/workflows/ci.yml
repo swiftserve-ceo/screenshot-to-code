@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, lg-telecoms-app-builder-foundation]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  # Poetry 2.x — required to read the lock file (lock-version 2.1).
+  POETRY_VERSION: "2.4.2"
+
+jobs:
+  backend:
+    name: backend (pytest, pyright, alembic)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: appbuilder
+          POSTGRES_PASSWORD: appbuilder
+          POSTGRES_DB: appbuilder
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U appbuilder -d appbuilder"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      # Non-secret throwaway credentials for CI service containers.
+      DATABASE_URL: postgresql+asyncpg://appbuilder:appbuilder@localhost:5432/appbuilder
+      REDIS_URL: redis://localhost:6379/0
+      REQUIRE_INFRA: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry ${{ env.POETRY_VERSION }}
+        run: pipx install "poetry==${{ env.POETRY_VERSION }}"
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ./backend/.venv
+          key: poetry-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('backend/poetry.lock') }}
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install --no-interaction
+
+      - name: Type check (pyright)
+        working-directory: backend
+        run: poetry run pyright
+
+      - name: Alembic upgrade / downgrade / upgrade round trip
+        working-directory: backend
+        run: |
+          poetry run alembic upgrade head
+          poetry run alembic downgrade base
+          poetry run alembic upgrade head
+
+      - name: Alembic model-drift check (schema matches ORM models)
+        working-directory: backend
+        run: poetry run alembic check
+
+      - name: Backend tests (pytest, infra required)
+        # Includes the live queue smoke test (tests/test_queue_smoke.py):
+        # JobService.create -> arq pool -> Redis -> real burst worker -> terminal
+        # state. No AI provider is invoked.
+        working-directory: backend
+        run: poetry run pytest -q
+
+  frontend:
+    name: frontend (jest, lint ratchet, build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable Corepack (pinned pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Unit tests (jest)
+        working-directory: frontend
+        run: pnpm test
+
+      - name: Lint (ratchet policy — see .lint-baseline.json)
+        working-directory: frontend
+        run: pnpm run lint:ratchet
+
+      - name: Production build
+        working-directory: frontend
+        run: pnpm build

@@ -15,6 +15,7 @@ from agent.providers.base import (
     ProviderSession,
     ProviderTurn,
     StreamEvent,
+    _log_token_usage,
 )
 from agent.providers.anthropic.image import (
     CLAUDE_MANY_IMAGE_MAX_DIMENSION,
@@ -497,12 +498,5 @@ class AnthropicProviderSession(ProviderSession):
         u = self._total_usage
         model_name = self._model.value
         pricing = MODEL_PRICING.get(_get_anthropic_api_model_name(self._model))
-        cost_str = f" cost=${u.cost(pricing):.4f}" if pricing else ""
-        cache_hit_rate_str = f" cache_hit_rate={u.cache_hit_rate_percent():.2f}%"
-        print(
-            f"[TOKEN USAGE] provider=anthropic model={model_name} | "
-            f"input={u.input} output={u.output} "
-            f"cache_read={u.cache_read} cache_write={u.cache_write} "
-            f"total={u.total}{cache_hit_rate_str}{cost_str}"
-        )
+        _log_token_usage("anthropic", model_name, u, pricing)
         await self._client.close()
